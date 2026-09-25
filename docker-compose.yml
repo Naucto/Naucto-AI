@@ -1,0 +1,33 @@
+# The shared Naucto AI service beside a Backend. One replica: generation jobs are dispatched by
+# this process, and the Backend expires jobs a stopped replica leaves behind.
+services:
+  naucto-ai:
+    build: .
+    restart: unless-stopped
+    environment:
+      NAUCTO_BACKEND_URL: ${NAUCTO_BACKEND_URL:-http://backend:3000}
+      NAUCTO_MCP_HOSTS: ${NAUCTO_MCP_HOSTS:?set the exact public host:port of this service}
+      AI_SERVICE_SECRET: ${AI_SERVICE_SECRET:?same value as the Backend's AI_SERVICE_SECRET}
+      NAUCTO_GENERATION_CONCURRENCY: ${NAUCTO_GENERATION_CONCURRENCY:-2}
+      NAUCTO_ENGINE_DOCS: /docs/index.json
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_SPRITE_ENDPOINT: ${HF_SPRITE_ENDPOINT:-}
+      HF_SPRITE_MODEL: ${HF_SPRITE_MODEL:-}
+      HF_MIDI_ENDPOINT: ${HF_MIDI_ENDPOINT:-}
+      HF_MIDI_MODEL: ${HF_MIDI_MODEL:-}
+      HF_SAMPLE_ENDPOINT: ${HF_SAMPLE_ENDPOINT:-}
+      HF_SAMPLE_MODEL: ${HF_SAMPLE_MODEL:-}
+    volumes:
+      - ${NAUCTO_ENGINE_DOCS_DIR:-../Frontend/apps/web/public/docs}:/docs:ro
+    ports:
+      - "127.0.0.1:3100:3100"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+    # Join the Backend's network (e.g. naucto-dev) so http://backend:3000 resolves.
+    networks: [naucto]
+
+networks:
+  naucto:
+    name: ${NAUCTO_NETWORK:-naucto-dev}
+    external: true
