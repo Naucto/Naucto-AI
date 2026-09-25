@@ -182,6 +182,10 @@ export class SynthCore {
     const glideStep = ins.glide > 0 ? 1 / Math.max(1, ins.glide * sr) : 0;
     const filterOn = ins.filter.type !== 'off';
     const q = 1 - Math.min(0.98, Math.max(0, ins.filter.resonance));
+    // The Chamberlin filter's update is stable only while f² + 2fq < 4, i.e. f < √(q² + 4) − q.
+    // Near Nyquist with little resonance a bright cutoff crosses that and the voice blows up into
+    // silence or clicks, so the coefficient stops just short of the bound: below it nothing changes.
+    const maxF = 0.98 * (Math.sqrt(q * q + 4) - q);
 
     for (let i = 0; i < frames; i++) {
       // envelope
@@ -261,7 +265,7 @@ export class SynthCore {
       // filter (Chamberlin SVF)
       if (filterOn) {
         const cutoff = Math.min(sr * 0.45, ins.filter.cutoff * (1 + ins.filter.envAmount * v.env));
-        const f = 2 * Math.sin((Math.PI * cutoff) / sr);
+        const f = Math.min(maxF, 2 * Math.sin((Math.PI * cutoff) / sr));
         v.low += f * v.band;
         const high = s - v.low - q * v.band;
         v.band += f * high;

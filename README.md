@@ -73,7 +73,7 @@ drift. Edit them in the Frontend, never here.
 | `read_sprite`, `draw_sprite`, `transform_sprite` | Pixels as rows (`0`–`f`, `.` transparent, `_` keep); draw or flip/rotate/shift/outline/recolor/mirror, with before/after pictures and a `pixels` operation that skips locked pixels |
 | `compare_sprites` | Up to four drafts side by side (rows, sheet regions, PixelLab jobs), at 1× too, tiled 3×3 for seams, with coverage, symmetry and stray-pixel counts |
 | `design_sfx`, `vary_pattern`, `convert_midi` | Native, editable sound drafts; MIDI with a loss report |
-| `render_sound` | A slot or draft played offline on the console's synth: piano roll, waveform, spectrogram, levels, voice stealing, filter instability, and how much of what was written is audible |
+| `render_sound` | A slot or draft played offline on the console's synth: piano roll, waveform, spectrogram, levels, voice stealing, and how much of what was written is audible |
 | `bake_sample` | A draft, an instrument note or a WAV as a console sample (8 kHz, 8-bit, ≤ 1.024 s) with an instrument that plays it |
 | `transcribe_audio` | A WAV recording into native drafts with the estimated quality loss, as the editor's import does |
 | `request_generation`, `get_generation`, `cancel_generation` | PixelLab sprite drafts (below) |
@@ -160,7 +160,5 @@ Frontend: `npx playwright test e2e/ai.spec.ts`.
 - Coordination assumes every collaborator runs a build with AI support; older builds block applying.
 - Platformer validation is a bounded approximation of the reference physics, not of arbitrary Lua.
 - The real PixelLab API is exercised only through its stub until a token is configured.
-- The synth's filter diverges when `cutoff × (1 + envAmount)` nears a sixth of the sample rate with
-  little resonance; `render_sound` reports it, the engine does not prevent it yet.
 - `transcribe_audio` takes WAV only; the editor decodes any format the browser can.
 - One service replica dispatches jobs; scale it with the Backend's ledger in mind.

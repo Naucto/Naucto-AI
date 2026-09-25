@@ -18,16 +18,17 @@ test('a song renders for as long as its patterns last, and what was written is h
   assert.ok(measured.peakDb < 0);
 });
 
-test('problems are reported: stolen voices, missing parts, an unstable filter', () => {
+test('problems are reported: stolen voices, missing parts; a bright filter stays stable', () => {
   const chord = pattern('c', [0, 1, 2, 3, 4, 5].map(i => [0, 60 + i * 3, 8] as [number, number, number]));
   const crowded = renderDraft({ instruments: [lead], patterns: [chord], samples: [] }, { as: 'MUSIC' });
   assert.ok(crowded.warnings.some(w => /6 notes sound at once/.test(w)));
   const missing = renderDraft({ instruments: [{ ...lead, osc: 'sample', sampleId: 'kick' }], patterns: [chord], samples: [] }, { as: 'SFX' });
   assert.ok(missing.warnings.some(w => /sample kick/.test(w)));
+  // A bright filter with little resonance used to blow up; the synth now keeps it stable.
   const bright = { ...lead, osc: 'saw', filter: { type: 'lp', cutoff: 8000, resonance: 0.2, envAmount: 1 } };
-  const unstable = renderDraft({ instruments: [bright], patterns: [pattern('p', [[0, 72, 4]])], samples: [] }, { as: 'SFX' });
-  assert.ok(unstable.warnings.some(w => /filter became unstable/.test(w)));
-  assert.ok(unstable.mono.every(Number.isFinite));
+  const stable = renderDraft({ instruments: [bright], patterns: [pattern('p', [[0, 72, 4]])], samples: [] }, { as: 'SFX' });
+  assert.deepEqual(stable.warnings, []);
+  assert.ok(stable.mono.every(Number.isFinite) && stable.mono.some(v => Math.abs(v) > 0.05));
 });
 
 test('designed effects bake into samples the console can store', () => {

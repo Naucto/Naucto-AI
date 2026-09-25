@@ -15,7 +15,7 @@ import { pianoRoll, type RollNote, spectrogram, stacked, waveform } from './rend
  * (levels, voices, and how much of what it wrote is actually heard) before proposing it.
  */
 
-/** The rate browsers usually run the synth at; its filter behaves differently at lower ones. */
+/** The rate browsers usually run the synth at, so a render sounds as it will in the editor. */
 export const RENDER_RATE = 48000;
 const BLOCK = 128;
 
@@ -140,9 +140,8 @@ export function renderDraft(draft: SoundDraft, options: { as: 'MUSIC' | 'SFX'; m
     const v = ((left[i] ?? 0) + (right[i] ?? 0)) / 2;
     if (Number.isFinite(v)) mono[i] = v; else broken++;
   }
-  // The synth's state-variable filter diverges when cutoff × (1 + envAmount) nears a sixth of the
-  // sample rate with little resonance; the player then hears silence or clicks.
-  if (broken) warnings.push(`The filter became unstable for ${(broken / rate).toFixed(2)} s (heard as silence or clicks): lower filter.cutoff or filter.envAmount, or raise filter.resonance.`);
+  // The synth keeps its filter stable, so this only catches malformed drafts (e.g. NaN parameters).
+  if (broken) warnings.push(`${(broken / rate).toFixed(2)} s rendered as silence: a parameter is not a number.`);
 
   // More notes at once than the chip has voices means some are cut short or never heard.
   const events = written.flatMap(n => [[n.start, 1], [n.end, -1]] as [number, number][]).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
