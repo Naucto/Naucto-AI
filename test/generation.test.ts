@@ -54,7 +54,11 @@ test('provider errors are never copied into the ledger', async () => {
   assert.ok(!log.join().includes('hf_abc'));
 });
 
-test('a generator counts as configured only with endpoint, model and token', () => {
-  assert.equal(configured(providersFromEnv({ HF_TOKEN: 't', HF_MIDI_ENDPOINT: 'https://x' }), 'midi'), false);
-  assert.equal(configured(providersFromEnv({ HF_TOKEN: 't', HF_MIDI_ENDPOINT: 'https://x', HF_MIDI_MODEL: 'm' }), 'midi'), true);
+test('a generator is enabled only when its provider has what it needs', () => {
+  assert.equal(configured(providersFromEnv({ HF_TOKEN: 't', NAUCTO_SPACE_URL: 'https://s' }), 'midi'), false, 'no provider chosen');
+  assert.equal(configured(providersFromEnv({ NAUCTO_MIDI_PROVIDER: 'space', NAUCTO_SPACE_URL: 'https://s' }), 'midi'), false, 'no token');
+  assert.equal(configured(providersFromEnv({ NAUCTO_MIDI_PROVIDER: 'space', HF_TOKEN: 't', NAUCTO_SPACE_URL: 'https://s' }), 'midi'), true);
+  assert.equal(configured(providersFromEnv({ NAUCTO_MIDI_PROVIDER: 'pixellab', PIXELLAB_TOKEN: 'p' }), 'midi'), false, 'PixelLab draws sprites only');
+  assert.equal(configured(providersFromEnv({ NAUCTO_SPRITE_PROVIDER: 'pixellab', PIXELLAB_TOKEN: 'p' }), 'sprite'), true);
+  assert.equal(configured(providersFromEnv({ NAUCTO_MIDI_PROVIDER: 'endpoint', HF_TOKEN: 't', HF_MIDI_ENDPOINT: 'https://x' }), 'midi'), false, 'endpoint needs a model id');
 });

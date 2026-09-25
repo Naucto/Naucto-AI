@@ -71,6 +71,48 @@ def to_sample(audio: np.ndarray, source_rate: int, seconds: float) -> str:
     return base64.b64encode(pcm.tobytes()).decode("ascii")
 
 
+def parse_request(kind: str, prompt: object, params_json: object) -> dict:
+    """Validate what the Naucto service sends, before any GPU time is spent on it."""
+    import json
+
+    if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 2000:
+        raise ValueError("prompt must be 1-2000 characters")
+    try:
+        params = json.loads(params_json) if isinstance(params_json, str) and params_json else {}
+    except json.JSONDecodeError as error:
+        raise ValueError("parameters must be JSON") from error
+    if not isinstance(params, dict):
+        raise ValueError("parameters must be an object")
+    out: dict = {"prompt": prompt.strip()}
+    seed = params.get("seed")
+    if seed is not None:
+        if not isinstance(seed, int) or not 0 <= seed < 2**31:
+            raise ValueError("seed must be a non-negative integer")
+        out["seed"] = seed
+    if kind == "sprite":
+        width, height, palette = params.get("width"), params.get("height"), params.get("palette")
+        if not all(isinstance(v, int) and 8 <= v <= 64 for v in (width, height)):
+            raise ValueError("width and height must be 8-64")
+        if not isinstance(palette, list) or len(palette) != 16:
+            raise ValueError("palette must have 16 colours")
+        for colour in palette:
+            hex_to_rgb(colour)
+        out.update(width=width, height=height, palette=palette)
+    elif kind == "midi":
+        beats = params.get("max_beats", 256)
+        if not isinstance(beats, int) or not 1 <= beats <= 256:
+            raise ValueError("max_beats must be 1-256")
+        out["max_beats"] = beats
+    elif kind == "sample":
+        seconds = params.get("seconds", 1.0)
+        if not isinstance(seconds, (int, float)) or not 0.05 <= seconds <= 1.0:
+            raise ValueError("seconds must be 0.05-1")
+        out["seconds"] = float(seconds)
+    else:
+        raise ValueError(f"unknown kind {kind}")
+    return out
+
+
 def midi_bytes_to_base64(data: bytes) -> str:
     if data[:4] != b"MThd":
         raise ValueError("not a Standard MIDI File")

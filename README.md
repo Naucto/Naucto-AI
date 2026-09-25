@@ -12,7 +12,7 @@ project.
 Claude / Codex ──MCP (HTTP, project token)──▶ Naucto-AI ──▶ Backend (/ai/mcp/*)
                                                  │               ▲
                                                  ▼               │ review, apply, revert
-                                  specialist endpoints        Frontend editor (every open tab)
+                          ZeroGPU Space / PixelLab    Frontend editor (every open tab)
 ```
 
 ## Repositories
@@ -21,7 +21,7 @@ Claude / Codex ──MCP (HTTP, project token)──▶ Naucto-AI ──▶ Back
 EIP/
   Backend/    feat/naucto-ai  — proposals, barrier, jobs ledger, provenance (NestJS + Prisma)
   Frontend/   feat/naucto-ai  — AI dialog, previews, catalog/locks, MIDI import, badges (Angular)
-  Naucto-AI/  this repository — MCP service, generation queue, endpoint handlers
+  Naucto-AI/  this repository — MCP service, generation queue, ZeroGPU Space
 ```
 
 `src/midi.ts` is a verbatim copy of `Frontend/packages/engine/src/sound/midi.ts`, so the editor's
@@ -122,17 +122,22 @@ them in **AI tools → Generation**, and only this service (holding `AI_SERVICE_
 result, with the identifier of the model that produced it. A job interrupted by a restart fails
 instead of being paid for twice. Results are drafts: they reach a game only through a proposal.
 
-`providers/` holds the endpoint contract and Hugging Face custom handlers — `text2midi`
-(amaai-lab/text2midi, Apache-2.0), `sprite` (configurable diffusers model + palette quantization) and
-`sample` (configurable text-to-audio). **No model is deployed by this repository**: deploy an
-endpoint, set `HF_TOKEN`, `HF_<KIND>_ENDPOINT` and `HF_<KIND>_MODEL`, then compare candidates with
-`npm run evaluate -- <sprite|midi|sample> <count>` (paid calls). Check each model's licence first.
+Each kind picks a provider (`NAUCTO_<KIND>_PROVIDER`), see [`providers/README.md`](providers/README.md):
+
+- **`space`** (default): Naucto's own ZeroGPU Space in `providers/space` — text2midi, SDXL with a
+  pixel-art LoRA, Stable Audio Open. Free to host; GPU time comes from the daily ZeroGPU quota of
+  `HF_TOKEN`'s account (5 min free, 40 min with PRO at $9/month).
+- **`pixellab`**: PixelLab's pixel-art API for sprites (subscription).
+- **`endpoint`**: any HTTPS service speaking the same contract, e.g. a paid Inference Endpoint.
+
+`scripts/build-space.sh` assembles the Space; `npm run evaluate -- <sprite|midi|sample> <count>`
+checks what survives conversion. Check each model's licence before publishing games made with it.
 
 ## Checks
 
 ```sh
 npm run typecheck && npm test          # service, contracts, queue, MCP over HTTP, stub endpoints
-npm run test:providers                 # Naucto format conversions (numpy + Pillow)
+npm run test:providers                 # Space conversions and request validation (numpy + Pillow)
 ```
 
 End to end against running services (a disposable database; the stub endpoints for generation):
@@ -148,5 +153,5 @@ Frontend: `npx playwright test e2e/ai.spec.ts`.
 
 - Coordination assumes every collaborator runs a build with AI support; older builds block applying.
 - Platformer validation is a bounded approximation of the reference physics, not of arbitrary Lua.
-- Generated-model quality is unmeasured until endpoints are deployed and `npm run evaluate` is run.
+- Generated-model quality is unmeasured until the Space is deployed and `npm run evaluate` is run.
 - One service replica dispatches jobs; scale it with the Backend's ledger in mind.

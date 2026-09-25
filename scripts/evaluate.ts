@@ -1,9 +1,9 @@
 /**
  * Benchmarks the configured specialist endpoints on Naucto's own acceptance criteria.
  *
- *   HF_TOKEN=… HF_MIDI_ENDPOINT=… HF_MIDI_MODEL=… npx tsx scripts/evaluate.ts midi 5
+ *   NAUCTO_MIDI_PROVIDER=space NAUCTO_SPACE_URL=… HF_TOKEN=… npx tsx scripts/evaluate.ts midi 5
  *
- * Every call is a paid request. The script prints, per prompt, whether the output survived
+ * Every call uses ZeroGPU quota or a paid provider's credits. The script prints, per prompt, whether the output survived
  * conversion into Naucto's formats and what was lost, so models are compared on usable assets
  * rather than on how their raw output looks.
  */
@@ -20,7 +20,7 @@ const kind = (process.argv[2] ?? 'midi') as Generation['kind'];
 const count = Math.min(Number(process.argv[3] ?? 3), PROMPTS[kind].length);
 const providers = providersFromEnv(process.env);
 if (!configured(providers, kind)) {
-  console.error(`Configure HF_TOKEN, HF_${kind.toUpperCase()}_ENDPOINT and HF_${kind.toUpperCase()}_MODEL first.`);
+  console.error(`Configure NAUCTO_${kind.toUpperCase()}_PROVIDER and its credentials first (see .env.example).`);
   process.exit(1);
 }
 
@@ -44,4 +44,4 @@ for (const prompt of PROMPTS[kind].slice(0, count)) {
   }
 }
 console.table(rows);
-console.log(`${providers[kind].model}: ${rows.filter(r => r.ok).length}/${rows.length} usable after conversion.`);
+console.log(`${providers.kinds[kind]?.provider}: ${rows.filter(r => r.ok).length}/${rows.length} usable after conversion.`);

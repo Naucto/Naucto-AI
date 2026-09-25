@@ -1,7 +1,0 @@
-torch
-diffusers
-transformers
-accelerate
-scipy
-numpy
-pillow

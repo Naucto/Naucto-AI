@@ -236,14 +236,14 @@ app.post('/mcp', async (req, res) => {
   });
 
   server.registerTool('request_generation', {
-    description: 'Start a job on a team-configured specialist model (sprite, midi, or one-second 8 kHz sample). Costs money; subject to a project quota; no automatic retries. Returns a job id; the result is a draft for a later proposal.',
+    description: 'Start a job on a team-configured generator (sprite, midi, or one-second 8 kHz sample): the Naucto ZeroGPU Space, PixelLab for sprites, or an endpoint. Uses shared GPU quota or paid credits; subject to a project quota; no automatic retries. Prefer native tools (design_sfx, convert_midi, catalogued art) when they suffice. Returns a job id; the result is a draft for a later proposal.',
     inputSchema: { request: generationSchema },
   }, async ({ request }) => {
     if (!configured(providers, request.kind) || !serviceSecret) throw new Error('That generator is not configured on this service; nothing was dispatched');
     return text(await queue.submit(request, ledger));
   });
   server.registerTool('get_generation', { description: 'Read a generation job of this project, with its draft result.', inputSchema: { id: z.string().uuid() }, annotations: read }, async ({ id }) => text(await call(`jobs/${id}`)));
-  server.registerTool('cancel_generation', { description: 'Cancel a job. Pending work is never dispatched; running work is aborted and its result discarded, but the provider may still finish and charge.', inputSchema: { id: z.string().uuid() } }, async ({ id }) => text(await call(`jobs/${id}/cancel`, {})));
+  server.registerTool('cancel_generation', { description: 'Cancel a job. Pending work is never dispatched; running work is aborted and its result discarded, but the provider may still finish it and count or bill it.', inputSchema: { id: z.string().uuid() } }, async ({ id }) => text(await call(`jobs/${id}/cancel`, {})));
 
   server.registerTool('search_engine_docs', {
     description: 'Search the version-matched Naucto Lua API documentation.',

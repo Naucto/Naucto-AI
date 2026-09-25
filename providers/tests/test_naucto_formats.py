@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "common"))
-from naucto_formats import MAX_SAMPLE_BYTES, midi_bytes_to_base64, quantize_sprite, to_sample  # noqa: E402
+from naucto_formats import MAX_SAMPLE_BYTES, midi_bytes_to_base64, parse_request, quantize_sprite, to_sample  # noqa: E402
 
 PALETTE = ["#000000", "#ffffff", "#ff0000", "#00ff00", "#0000ff"] + ["#808080"] * 11
 
@@ -50,6 +50,26 @@ class MidiTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             midi_bytes_to_base64(b"RIFF....")
         self.assertTrue(midi_bytes_to_base64(b"MThd" + b"\0" * 10))
+
+
+class RequestTests(unittest.TestCase):
+    def test_accepts_what_the_service_sends(self):
+        sprite = parse_request("sprite", "a slime", '{"width": 16, "height": 16, "palette": %s}' % str(PALETTE).replace("'", '"'))
+        self.assertEqual((sprite["width"], sprite["height"]), (16, 16))
+        self.assertEqual(parse_request("midi", "a loop", '{"max_beats": 256}')["max_beats"], 256)
+        self.assertEqual(parse_request("sample", "a coin", '{"seconds": 0.5, "sample_rate": 8000}')["seconds"], 0.5)
+
+    def test_refuses_before_spending_gpu_time(self):
+        for kind, prompt, params in [
+            ("sprite", "x", '{"width": 512, "height": 16, "palette": []}'),
+            ("midi", "", "{}"),
+            ("midi", "x" * 2001, "{}"),
+            ("sample", "x", '{"seconds": 5}'),
+            ("midi", "x", "not json"),
+            ("video", "x", "{}"),
+        ]:
+            with self.assertRaises(ValueError, msg=(kind, params)):
+                parse_request(kind, prompt, params)
 
 
 if __name__ == "__main__":

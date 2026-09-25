@@ -5,7 +5,8 @@
  *     npx tsx scripts/live-e2e.ts
  *
  * Needs a disposable database (it registers a user and creates a project) and, for the generation
- * step, the service configured against the stub endpoints. The editors are simulated with Yjs
+ * step, the service configured against the stubs (`npm run stub` behind HTTPS, with
+ * NAUCTO_MIDI_PROVIDER=space and NAUCTO_SPACE_URL pointing at it). The editors are simulated with Yjs
  * documents speaking the same HTTP protocol the browser bridge does.
  */
 import assert from 'node:assert/strict';
@@ -158,7 +159,7 @@ for (let i = 0; i < 50 && !['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(state);
 }
 const finished = await call<{ state: string; model: string; result: { report: { importedNotes: number } } }>('get_generation', { id: job.id });
 assert.equal(finished.state, 'SUCCEEDED');
-assert.equal(finished.model, 'stub/midi@test');
+assert.match(finished.model, /stub\/midi@test$/);
 assert.equal(finished.result.report.importedNotes, 2);
 const listed = await api<{ id: string }[]>(`${base}/jobs`, jwt);
 assert.ok(listed.some(j => j.id === job.id), 'editors see the job');
