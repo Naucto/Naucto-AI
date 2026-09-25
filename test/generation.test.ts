@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { configured, GenerationQueue, type Generation, type Ledger, providersFromEnv } from '../src/generation.js';
+import { configured, generationSchema, GenerationQueue, type Generation, type Ledger, providersFromEnv } from '../src/generation.js';
 
-const request: Generation = { kind: 'midi', prompt: 'a short loop', prefix: 'test', voices: 4 };
+const request: Generation = { kind: 'sprite', prompt: 'a knight', width: 16, height: 16, palette: new Array(16).fill('#000000') };
 
 function fakeLedger(overrides: Partial<Ledger> = {}) {
   const log: string[] = [];
@@ -47,18 +47,16 @@ test('cancelling a running job aborts it and records no result', async () => {
 });
 
 test('provider errors are never copied into the ledger', async () => {
-  const queue = new GenerationQueue(async () => { throw new Error('secret token hf_abc in body'); });
+  const queue = new GenerationQueue(async () => { throw new Error('secret token pl_abc in body'); });
   const { ledger, log } = fakeLedger();
   await queue.submit(request, ledger);
   await queue.idle();
-  assert.ok(!log.join().includes('hf_abc'));
+  assert.ok(!log.join().includes('pl_abc'));
 });
 
-test('a generator is enabled only when its provider has what it needs', () => {
-  assert.equal(configured(providersFromEnv({ HF_TOKEN: 't', NAUCTO_SPACE_URL: 'https://s' }), 'midi'), false, 'no provider chosen');
-  assert.equal(configured(providersFromEnv({ NAUCTO_MIDI_PROVIDER: 'space', NAUCTO_SPACE_URL: 'https://s' }), 'midi'), false, 'no token');
-  assert.equal(configured(providersFromEnv({ NAUCTO_MIDI_PROVIDER: 'space', HF_TOKEN: 't', NAUCTO_SPACE_URL: 'https://s' }), 'midi'), true);
-  assert.equal(configured(providersFromEnv({ NAUCTO_MIDI_PROVIDER: 'pixellab', PIXELLAB_TOKEN: 'p' }), 'midi'), false, 'PixelLab draws sprites only');
-  assert.equal(configured(providersFromEnv({ NAUCTO_SPRITE_PROVIDER: 'pixellab', PIXELLAB_TOKEN: 'p' }), 'sprite'), true);
-  assert.equal(configured(providersFromEnv({ NAUCTO_MIDI_PROVIDER: 'endpoint', HF_TOKEN: 't', HF_MIDI_ENDPOINT: 'https://x' }), 'midi'), false, 'endpoint needs a model id');
+test('generation is enabled only with a PixelLab token, and only for sprites', () => {
+  assert.equal(configured(providersFromEnv({})), false);
+  assert.equal(configured(providersFromEnv({ PIXELLAB_TOKEN: 'p' })), true);
+  assert.equal(providersFromEnv({ PIXELLAB_MIN_SIZE: '64' }).pixellabMinSize, 64);
+  assert.equal(generationSchema.safeParse({ kind: 'midi', prompt: 'loop' }).success, false);
 });

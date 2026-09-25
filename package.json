@@ -1,6 +1,6 @@
 {
   "name": "@naucto/ai",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -9,8 +9,6 @@
   "scripts": {
     "start": "tsx src/server.ts",
     "stub": "tsx scripts/stub-endpoint.ts",
-    "evaluate": "tsx scripts/evaluate.ts",
-    "test:providers": "python3 -m unittest discover -s providers/tests",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test --test-concurrency=1 test/*.test.ts",
     "sync:shared": "node scripts/sync-shared.mjs"

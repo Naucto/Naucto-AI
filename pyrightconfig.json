@@ -1,4 +1,0 @@
-{
-  "extraPaths": ["providers/common"],
-  "reportMissingImports": "warning"
-}

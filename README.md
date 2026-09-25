@@ -1,7 +1,8 @@
 # Naucto AI
 
 A shared MCP service that lets an assistant (Claude Code, Codex, any MCP client) work on a Naucto
-project, plus the specialist-model plumbing for sprites, music and sound effects.
+project: read it, draw sprites and compose sound with tools that show the result as pictures, and
+propose changes. PixelLab can be asked for a second opinion on sprites.
 
 The assistant **proposes**; a person **applies**. Every change is an immutable proposal that a
 project editor inspects in Naucto, where applying it pauses every open editor, merges their exact
@@ -12,7 +13,7 @@ project.
 Claude / Codex ──MCP (HTTP, project token)──▶ Naucto-AI ──▶ Backend (/ai/mcp/*)
                                                  │               ▲
                                                  ▼               │ review, apply, revert
-                          ZeroGPU Space / PixelLab    Frontend editor (every open tab)
+                              PixelLab (sprites)      Frontend editor (every open tab)
 ```
 
 ## Repositories
@@ -20,13 +21,15 @@ Claude / Codex ──MCP (HTTP, project token)──▶ Naucto-AI ──▶ Back
 ```
 EIP/
   Backend/    feat/naucto-ai  — proposals, barrier, jobs ledger, provenance (NestJS + Prisma)
-  Frontend/   feat/naucto-ai  — AI dialog, previews, catalog/locks, MIDI import, badges (Angular)
-  Naucto-AI/  this repository — MCP service, generation queue, ZeroGPU Space
+  Frontend/   feat/naucto-ai  — AI dialog, previews, catalog/locks, music import, badges (Angular)
+  Naucto-AI/  this repository — MCP service, pictures, offline synth, generation queue
 ```
 
-`src/midi.ts` is a verbatim copy of `Frontend/packages/engine/src/sound/midi.ts`, so the editor's
-MIDI import and the service's conversion of generated MIDI are the same code. `npm run sync:shared`
-copies it; a test fails when the two drift.
+`src/engine/` holds verbatim copies of the engine's sound code from
+`Frontend/packages/engine/src/sound/`: the MIDI importer, the audio transcriber, and the chip synth
+(`model`, `SynthCore`, `Sequencer`, `sample-codec`). What the service renders is what a player hears,
+and its conversions are the editor's own. `npm run sync:shared` copies them; a test fails when they
+drift. Edit them in the Frontend, never here.
 
 ## Running it
 
@@ -66,8 +69,14 @@ copies it; a test fails when the two drift.
 | `draft_level`, `resolve_level_roles`, `check_adjacency` | Seeded top-down/platformer scaffolds → catalogued tiles, with declared adjacency checked |
 | `validate_top_down_path`, `validate_platformer` | Reachability under an explicit movement profile. Approximate: playtest |
 | `get_game_template` | Optional Lua: top-down movement, platformer physics matching the validator, level progression over named maps |
+| `render_sheet`, `render_map` | Pictures: enlarged, transparency as a checkerboard, 8×8 grid, rulers in the coordinates the tools take |
+| `read_sprite`, `draw_sprite`, `transform_sprite` | Pixels as rows (`0`–`f`, `.` transparent, `_` keep); draw or flip/rotate/shift/outline/recolor/mirror, with before/after pictures and a `pixels` operation that skips locked pixels |
+| `compare_sprites` | Up to four drafts side by side (rows, sheet regions, PixelLab jobs), at 1× too, tiled 3×3 for seams, with coverage, symmetry and stray-pixel counts |
 | `design_sfx`, `vary_pattern`, `convert_midi` | Native, editable sound drafts; MIDI with a loss report |
-| `request_generation`, `get_generation`, `cancel_generation` | Specialist model jobs (below) |
+| `render_sound` | A slot or draft played offline on the console's synth: piano roll, waveform, spectrogram, levels, voice stealing, filter instability, and how much of what was written is audible |
+| `bake_sample` | A draft, an instrument note or a WAV as a console sample (8 kHz, 8-bit, ≤ 1.024 s) with an instrument that plays it |
+| `transcribe_audio` | A WAV recording into native drafts with the estimated quality loss, as the editor's import does |
+| `request_generation`, `get_generation`, `cancel_generation` | PixelLab sprite drafts (below) |
 | `search_engine_docs` | The version-matched Lua API reference |
 
 There is no tool to approve, apply, publish, delete or manage collaborators. All project content is
@@ -122,25 +131,22 @@ them in **AI tools → Generation**, and only this service (holding `AI_SERVICE_
 result, with the identifier of the model that produced it. A job interrupted by a restart fails
 instead of being paid for twice. Results are drafts: they reach a game only through a proposal.
 
-Each kind picks a provider (`NAUCTO_<KIND>_PROVIDER`), see [`providers/README.md`](providers/README.md):
+Sprites are the one kind generated outside: PixelLab's pixel-art model (`PIXELLAB_TOKEN`, paid
+credits), downsampled and put on the game's palette. The intended loop is to draw a sprite with
+`draw_sprite`, ask PixelLab for the same thing, and set them side by side with `compare_sprites`.
 
-- **`space`** (default): Naucto's own ZeroGPU Space in `providers/space` — text2midi, SDXL with a
-  pixel-art LoRA, Stable Audio Open. Free to host; GPU time comes from the daily ZeroGPU quota of
-  `HF_TOKEN`'s account (5 min free, 40 min with PRO at $9/month).
-- **`pixellab`**: PixelLab's pixel-art API for sprites (subscription).
-- **`endpoint`**: any HTTPS service speaking the same contract, e.g. a paid Inference Endpoint.
-
-`scripts/build-space.sh` assembles the Space; `npm run evaluate -- <sprite|midi|sample> <count>`
-checks what survives conversion. Check each model's licence before publishing games made with it.
+Music and sound effects are never generated by an external model: the assistant composes them with
+the synth and checks them with `render_sound`, and people bring their own music through the editor's
+**Import music or sound** (MIDI, or a recording transcribed on their computer with its estimated
+loss shown), which is not AI provenance.
 
 ## Checks
 
 ```sh
-npm run typecheck && npm test          # service, contracts, queue, MCP over HTTP, stub endpoints
-npm run test:providers                 # Space conversions and request validation (numpy + Pillow)
+npm run typecheck && npm test          # service, pictures, synth, queue, MCP over HTTP, PixelLab stub
 ```
 
-End to end against running services (a disposable database; the stub endpoints for generation):
+End to end against running services (a disposable database; the PixelLab stub for generation):
 
 ```sh
 NAUCTO_BACKEND_URL=http://127.0.0.1:3057 NAUCTO_MCP_URL=http://127.0.0.1:3100/mcp npx tsx scripts/live-e2e.ts
@@ -153,5 +159,8 @@ Frontend: `npx playwright test e2e/ai.spec.ts`.
 
 - Coordination assumes every collaborator runs a build with AI support; older builds block applying.
 - Platformer validation is a bounded approximation of the reference physics, not of arbitrary Lua.
-- Generated-model quality is unmeasured until the Space is deployed and `npm run evaluate` is run.
+- The real PixelLab API is exercised only through its stub until a token is configured.
+- The synth's filter diverges when `cutoff × (1 + envAmount)` nears a sixth of the sample rate with
+  little resonance; `render_sound` reports it, the engine does not prevent it yet.
+- `transcribe_audio` takes WAV only; the editor decodes any format the browser can.
 - One service replica dispatches jobs; scale it with the Backend's ledger in mind.

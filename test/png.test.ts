@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { decodePng, quantize } from '../src/png.js';
 import { stubPng } from '../scripts/stub-endpoint.js';
 
-test('decodes an RGBA PNG and quantizes it like the Space does', () => {
+test('decodes an RGBA PNG and quantizes it onto the game palette', () => {
   const image = decodePng(stubPng(32));
   assert.equal(image.width, 32);
   assert.deepEqual([...image.data.subarray(0, 4)], [255, 255, 255, 255]);

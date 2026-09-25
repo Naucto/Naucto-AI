@@ -73,8 +73,7 @@ export function decodePng(bytes: Uint8Array): Rgba {
 }
 
 /**
- * Box-downsample to the sprite's size and map onto the game palette, the same rules as the Space's
- * Python conversion: index 0 is transparent (low alpha, or the corner colour when all four corners
+ * Box-downsample to the sprite's size and map onto the game palette: index 0 is transparent (low alpha, or the corner colour when all four corners
  * agree); opaque pixels take indices 1–15 by perceptually weighted distance.
  */
 export function quantize(image: Rgba, width: number, height: number, palette: string[]): number[] {

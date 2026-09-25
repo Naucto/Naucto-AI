@@ -471,3 +471,63 @@ export function convertMidi(parsed: ParsedMidi, options: MidiImportOptions): Mid
     },
   };
 }
+
+/**
+ * A Standard MIDI File (format 1, 480 ticks a beat) of parsed notes, so a transcription can be
+ * taken to another tool. One track per `MidiTrack`, at the opening tempo.
+ */
+export function writeMidi(parsed: ParsedMidi): Uint8Array {
+  const ppq = 480;
+  const ticksPerSecond = (parsed.bpm / 60) * ppq;
+  const vlq = (value: number): number[] => {
+    const out = [value & 127];
+    for (let v = value >> 7; v > 0; v >>= 7) out.unshift((v & 127) | 128);
+    return out;
+  };
+  const chunk = (tag: string, body: number[]): number[] => [
+    ...Array.from(tag, (c) => c.charCodeAt(0)),
+    (body.length >>> 24) & 255,
+    (body.length >>> 16) & 255,
+    (body.length >>> 8) & 255,
+    body.length & 255,
+    ...body,
+  ];
+  const us = Math.round(60e6 / parsed.bpm);
+  const tempo = [0, 255, 81, 3, (us >> 16) & 255, (us >> 8) & 255, us & 255, 0, 255, 47, 0];
+  const tracks = parsed.tracks.map((track) => {
+    const events: { tick: number; order: number; bytes: number[] }[] = [];
+    for (const note of track.notes) {
+      const channel = note.channel & 15;
+      const pitch = Math.max(0, Math.min(127, Math.round(note.pitch)));
+      const velocity = Math.max(1, Math.min(127, Math.round(note.velocity)));
+      events.push({
+        tick: Math.round(note.start * ticksPerSecond),
+        order: 1,
+        bytes: [0x90 | channel, pitch, velocity],
+      });
+      events.push({
+        tick: Math.max(
+          Math.round(note.start * ticksPerSecond) + 1,
+          Math.round(note.end * ticksPerSecond),
+        ),
+        order: 0,
+        bytes: [0x80 | channel, pitch, 0],
+      });
+    }
+    events.sort((a, b) => a.tick - b.tick || a.order - b.order);
+    const body: number[] = [];
+    const name = Array.from(track.name.slice(0, 40), (c) => c.charCodeAt(0) & 127);
+    body.push(0, 255, 3, name.length, ...name);
+    if (track.program !== null && track.channels[0] !== undefined)
+      body.push(0, 0xc0 | (track.channels[0] & 15), track.program & 127);
+    let at = 0;
+    for (const event of events) {
+      body.push(...vlq(event.tick - at), ...event.bytes);
+      at = event.tick;
+    }
+    body.push(0, 255, 47, 0);
+    return chunk('MTrk', body);
+  });
+  const header = chunk('MThd', [0, 1, 0, tracks.length + 1, ppq >> 8, ppq & 255]);
+  return Uint8Array.from([...header, ...chunk('MTrk', tempo), ...tracks.flat()]);
+}

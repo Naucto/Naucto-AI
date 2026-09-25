@@ -5,8 +5,8 @@
  *     npx tsx scripts/live-e2e.ts
  *
  * Needs a disposable database (it registers a user and creates a project) and, for the generation
- * step, the service configured against the stubs (`npm run stub` behind HTTPS, with
- * NAUCTO_MIDI_PROVIDER=space and NAUCTO_SPACE_URL pointing at it). The editors are simulated with Yjs
+ * step, the service configured against the PixelLab stub (`npm run stub` behind HTTPS, with
+ * PIXELLAB_TOKEN set and PIXELLAB_API_URL pointing at it). The editors are simulated with Yjs
  * documents speaking the same HTTP protocol the browser bridge does.
  */
 import assert from 'node:assert/strict';
@@ -151,20 +151,22 @@ assert.deepEqual([...afterRevert.categories].sort(), ['CODE', 'MAPS', 'SFX'], 'h
 step('revert refused over a later human edit; provenance kept');
 
 // ---- generation through the backend ledger -----------------------------------------------
-const job = await call<{ id: string }>('request_generation', { request: { kind: 'midi', prompt: 'a loop', prefix: 'gen', voices: 4 } });
+const job = await call<{ id: string }>('request_generation', { request: { kind: 'sprite', prompt: 'a red gem', width: 8, height: 8, palette: context.palette } });
 let state = '';
 for (let i = 0; i < 50 && !['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(state); i++) {
   await new Promise(resolve => setTimeout(resolve, 200));
   state = (await call<{ state: string }>('get_generation', { id: job.id })).state;
 }
-const finished = await call<{ state: string; model: string; result: { report: { importedNotes: number } } }>('get_generation', { id: job.id });
+const finished = await call<{ state: string; model: string; result: { pixels: number[] } }>('get_generation', { id: job.id });
 assert.equal(finished.state, 'SUCCEEDED');
-assert.match(finished.model, /stub\/midi@test$/);
-assert.equal(finished.result.report.importedNotes, 2);
+assert.equal(finished.model, 'pixellab:create-image-pixflux');
+assert.equal(finished.result.pixels.length, 64);
+const compared = await client.callTool({ name: 'compare_sprites', arguments: { candidates: [{ label: 'mine', source: { rows: ['..88..', '.8888.', '..88..'] } }, { label: 'pixellab', source: { jobId: job.id } }] } });
+assert.ok((compared.content as { type: string }[]).some(block => block.type === 'image'), 'the PixelLab draft is set beside the assistant\'s own');
 const listed = await api<{ id: string }[]>(`${base}/jobs`, jwt);
 assert.ok(listed.some(j => j.id === job.id), 'editors see the job');
 await assert.rejects(fetch(`${backend}/ai/mcp/jobs/${job.id}/complete`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ result: {}, model: 'forged' }) }).then(r => { if (!r.ok) throw new Error(String(r.status)); }), /401|503/);
-step('generation: queued in the backend ledger, ran on the endpoint, stored with its model; results cannot be forged with the project token');
+step('generation: queued in the backend ledger, ran on PixelLab, stored with its model, compared with a drawn draft; results cannot be forged with the project token');
 
 await api(`${base}/declarations`, jwt, { categories: ['SPRITES'], note: 'Title art from an external tool' });
 assert.ok((await api<{ categories: string[] }>(`${base}/provenance`, jwt)).categories.includes('SPRITES'));
