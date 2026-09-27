@@ -654,7 +654,20 @@ export function transcribe(
   const { signal, truncated } = prepare(channels, sampleRate, options.maxSeconds ?? 180);
   const frames = analyse(signal, lowest, highest, voices);
   const { notes } = trackNotes(frames, sensitivity);
-  const drums = options.drums === false ? [] : drumHits(frames, notes);
+  const bpm = tempoOf(frames.flux);
+  // A note shorter than an eighth cannot be written down or played: the editor's grid is 1/8 steps.
+  // What is left are the analysis window's own blur, and they read as junk stabs in the roll. Only
+  // drop one when it stands alone: a real fast note has a neighbour within an eighth, and length on
+  // its own cannot tell them apart, because the long window blurs a genuine sixteenth down to the
+  // same 50-100 ms a blur lands in. A tempo-derived floor cannot either — the estimate is off by a
+  // third on staccato input, which is exactly the input where notes are shortest.
+  const eighth = Math.max(0.06, 30 / bpm);
+  const pitched = notes.filter(
+    (n) =>
+      n.end - n.start >= eighth ||
+      notes.some((m) => m !== n && Math.abs(m.start - n.start) < eighth),
+  );
+  const drums = options.drums === false ? [] : drumHits(frames, pitched);
   const track = (index: number, name: string, list: MidiNote[], channel: number): MidiTrack => ({
     index,
     name,
@@ -663,7 +676,7 @@ export function transcribe(
     program: null,
     percussion: channel === 9 && list.length > 0,
   });
-  const tracks = [track(0, 'melody & harmony', notes, 0), track(1, 'drums', drums, 9)].filter(
+  const tracks = [track(0, 'melody & harmony', pitched, 0), track(1, 'drums', drums, 9)].filter(
     (t) => t.notes.length,
   );
   const warnings = [
@@ -674,7 +687,7 @@ export function transcribe(
   if (!tracks.length) throw new Error('No notes were found in this recording');
   const midi: ParsedMidi = {
     tracks,
-    bpm: tempoOf(frames.flux),
+    bpm,
     tempoChanges: 0,
     sustained: 0,
     warnings,
@@ -682,7 +695,7 @@ export function transcribe(
   };
   const quality = scoreNotes(
     frames.analysis,
-    [...notes, ...drums].map((n) => ({ ...n, drum: n.channel === 9 })),
+    [...pitched, ...drums].map((n) => ({ ...n, drum: n.channel === 9 })),
   );
   return { midi, analysis: frames.analysis, quality, truncated };
 }

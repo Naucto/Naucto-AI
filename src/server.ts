@@ -8,8 +8,8 @@ import { configured, generate, generationSchema, GenerationQueue, type Ledger, p
 import { draftLevel, platformReachable } from './levels.js';
 import { convertMidi, readMidi } from './engine/midi.js';
 import {
-  adjacency, catalogStatus, type Context, designSfx, mapRegion, placeSection, proposalSchema, reachable,
-  resolveRoles, SFX_KINDS, sha, sheetRegion, tileHash, varyPattern,
+  adjacency, catalogStatus, type Context, designSfx, mapRegion, NET_CLIENT_READ, NET_CLIENT_WRITE, netPermissionRows, netUndeclaredUsages, placeSection,
+  proposalSchema, reachable, resolveFlags, resolveRoles, SFX_KINDS, sha, sheetRegion, tileHash, varyPattern,
 } from './native.js';
 import { Canvas, gridPicture, image, sideBySide, stacked, tiled } from './render.js';
 import {
@@ -23,6 +23,24 @@ import { templates } from './templates.js';
 const backend = new URL(process.env.NAUCTO_BACKEND_URL ?? 'http://localhost:3000');
 const hosts = new Set((process.env.NAUCTO_MCP_HOSTS ?? 'localhost:3100,127.0.0.1:3100').split(','));
 const serviceSecret = process.env.AI_SERVICE_SECRET ?? '';
+// A long-lived assistant key, as the account owner issued it. It reaches only the projects it was
+// linked to, and never expires unless the owner gave it a date. NAUCTO_PROJECT names which one
+// when a key covers several; the 8-hour project token still works for the in-editor flow.
+//
+// The Host/Origin check above stops browsers, not clients: anything that can reach the port may
+// send a Host header it likes and no Origin at all. So lending this key to a request that arrived
+// without a credential would hand the owner's projects to whoever dialled in, and on the public
+// deployment that is anyone. Clients send their own key instead; this is for the single-user local
+// case, where the process reading .env is already the owner.
+const assistantKey = process.env.NAUCTO_KEY ?? '';
+const assistantProject = process.env.NAUCTO_PROJECT ?? '';
+const bind = process.env.HOST ?? '127.0.0.1';
+const local = bind === '127.0.0.1' || bind === 'localhost' || bind === '::1';
+if (assistantKey && !local) {
+  throw new Error(
+    'NAUCTO_KEY may only be used on a loopback bind: a remote caller cannot be told apart by a Host header, so lending the key would give it away. Bind to 127.0.0.1, or have clients send their own `Bearer naucto_k_…`.',
+  );
+}
 const providers = providersFromEnv(process.env);
 const queue = new GenerationQueue((input, signal) => generate(input, signal, providers), Number(process.env.NAUCTO_GENERATION_CONCURRENCY ?? 2));
 
@@ -38,14 +56,26 @@ app.post('/mcp', async (req, res) => {
     res.status(403).json({ error: 'Host/origin not allowed' });
     return;
   }
-  const token = req.headers.authorization?.match(/^Bearer (naucto_ai_[a-f0-9]{64})$/)?.[1];
-  if (!token) {
-    res.status(401).json({ error: 'Project-scoped Naucto AI token required' });
+  const hint = typeof req.headers['x-naucto-project'] === 'string' ? req.headers['x-naucto-project'] : '';
+  // The client's own credential, of either kind, and only that one. Falling back to the server's
+  // key when a client sent something we did not recognise would serve identity A as identity B.
+  const sent = req.headers.authorization?.match(/^Bearer ((?:naucto_ai|naucto_k)_[a-f0-9]{64})$/)?.[1];
+  if (sent) return serve(req, res, sent, hint);
+  if (req.headers.authorization) {
+    res.status(401).json({ error: 'Unrecognised credential' });
     return;
   }
+  // Nothing sent at all, and this is a loopback bind (see above): the owner at this machine.
+  if (assistantKey) return serve(req, res, assistantKey, assistantProject || hint);
+  res.status(401).json({ error: 'An assistant key or a project token is required' });
+});
+
+/** One authenticated request: check the credential, then build the MCP server around it. */
+async function serve(req: Parameters<express.RequestHandler>[0], res: Parameters<express.RequestHandler>[1], token: string, project: string): Promise<void> {
   const call = async (path: string, body?: unknown, service = false): Promise<unknown> => {
     const headers: Record<string, string> = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
     if (service) headers['x-naucto-ai-service'] = serviceSecret;
+    if (project) headers['x-naucto-project'] = project;
     const result = await fetch(new URL(`/ai/mcp/${path}`, backend), {
       method: body === undefined ? 'GET' : 'POST',
       headers,
@@ -62,8 +92,8 @@ app.post('/mcp', async (req, res) => {
   // Every request is authenticated, discovery included; the token never reaches a model provider.
   try {
     z.object({ projectId: z.number().int(), userId: z.number().int() }).parse(await call('connection'));
-  } catch {
-    res.status(401).json({ error: 'AI connection expired or revoked' });
+  } catch (error) {
+    res.status(401).json({ error: error instanceof Error ? error.message : 'AI connection expired or revoked' });
     return;
   }
   const ledger: Ledger = {
@@ -73,19 +103,37 @@ app.post('/mcp', async (req, res) => {
     complete: async (id, result, model) => { await call(`jobs/${id}/complete`, { result, model }, true); },
     fail: async (id, error) => { await call(`jobs/${id}/fail`, { error }, true); },
   };
-  const context = async (): Promise<{ hash: string; content: Context }> => call('context') as Promise<{ hash: string; content: Context }>;
+  const context = async (): Promise<{ hash: string; content: Context; ageMs?: number }> => call('context') as Promise<{ hash: string; content: Context; ageMs?: number }>;
 
   const server = new McpServer({ name: 'naucto', version: '0.3.0' }, { instructions: `Naucto fantasy-console projects: Lua code, 16-colour sprite sheets, tile maps, chip music and SFX. Read with the read_* tools, then stage changes with propose_changes; a person reviews and applies them in the editor. You cannot approve or apply. Look at your work before proposing it: render_sheet, render_map and compare_sprites for art (draw with draw_sprite and transform_sprite), render_sound for music and effects (compose with the synth; bake_sample for samples). ${UNTRUSTED}` });
   const text = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] });
   const read = { readOnlyHint: true };
 
+  server.registerTool('list_projects', {
+    description: `Every project this key may reach, with the name of each, how old the state it exposes is, and how many changes are waiting there. Use it first when a key covers more than one game: without X-Naucto-Project every other call is refused rather than guessed. ${UNTRUSTED}`,
+    annotations: read,
+  }, async () => {
+    const projects = z.array(z.object({
+      projectId: z.number().int(), userId: z.number().int(), name: z.string(),
+      contextUpdatedAt: z.string().nullable(), contextAgeMs: z.number().nullable(), pendingProposals: z.number().int().nonnegative(),
+    })).parse(await call('projects'));
+    return text({
+      projects,
+      note: 'A null contextUpdatedAt means no editor has ever shared that project, so there is nothing to work from yet. A large contextAgeMs means the state is old: changes you stage may be refused when a person applies them, because what they write is checked against the real document at that moment.',
+      multiProject: projects.length > 1,
+    });
+  });
+
   server.registerTool('read_project', {
     description: `Summary of the open editor state: code files, sheets, maps, sound slots, catalog size, locks, and the snapshotHash every proposal must cite. Use the other read_* tools for contents. ${UNTRUSTED}`,
     annotations: read,
   }, async () => {
-    const { hash, content: c } = await context();
+    const { hash, content: c, ageMs } = await context();
     return text({
       snapshotHash: hash,
+      // How far back this state reaches. Nobody may have the project open, and a change staged
+      // against an old state is refused at the moment a person applies it.
+      stateAgeMs: ageMs ?? null,
       palette: c.palette,
       code: c.code.map(f => ({ id: f.id, name: f.name, lines: f.text.split('\n').length, characters: f.text.length })),
       sheets: c.sheets.map(s => ({ id: s.id, name: s.name, width: s.width, height: s.height, firstSprite: s.base })),
@@ -98,6 +146,7 @@ app.post('/mcp', async (req, res) => {
       songs: Object.keys(c.songs),
       sfx: c.sfx,
       samples: c.samples,
+      netPermissions: Object.keys(c.netPermissions ?? {}).length,
     });
   });
 
@@ -145,6 +194,30 @@ app.post('/mcp', async (req, res) => {
     return text({ instruments: pick(c.instruments), patterns: pick(c.patterns), songs: c.songs, sfx: c.sfx, samples: c.samples });
   });
 
+  server.registerTool('read_net_permissions', {
+    description: `The declared multiplayer table: every net.state path the document declares, whether a client may read or write it, the value a session starts it at, and whether the game's Lua names it (a hint: a path built at runtime, or filled by a table assignment, is not found by name). Change a declaration with a net_permissions operation in propose_changes; that edits the document, so it is reviewed and reverted like code. A running session's live values are not here and cannot be: they belong to the session, not the document. ${UNTRUSTED}`,
+    inputSchema: { path: z.string().optional() },
+    annotations: read,
+  }, async ({ path: only }) => {
+    const c = (await context()).content;
+    const rows = netPermissionRows(c);
+    const filtered = only ? rows.filter(row => row['path'] === only || String(row['path']).startsWith(`${only}.`)) : rows;
+    // The Lua side matters as much as the table: a path nobody writes is a promise the game does
+    // not keep, and one that is written but undeclared is invisible to the permissions.
+    const lua = c.code.filter(file => /net\.(state|host|join|lock|queue|on|emit)/.test(file.text)).map(file => file.name);
+    return text({
+      declarations: filtered,
+      total: rows.length,
+      filesUsingNet: lua,
+      // The two mismatches worth a person's attention: a declaration nothing appears to use, and a
+      // path the game writes with nothing said about who else may. Both are text search, so both
+      // are hints: a path built at runtime, or filled by a table assignment
+      // (`net.state.players[id] = { score = 0 }`), is not found by name.
+      declaredButUnmentioned: rows.filter(row => !row['referencedInCode']).map(row => row['path']),
+      usedButUndeclared: netUndeclaredUsages(c),
+    });
+  });
+
   server.registerTool('read_catalog', {
     description: `The project's asset catalog. \`stale: true\` means the artwork changed since it was catalogued: do not rely on it until a person refreshes it. Semantics other than "unconfirmed" were set by people. ${UNTRUSTED}`,
     inputSchema: { kind: z.enum(['sprite', 'tile', 'animation', 'section', 'music', 'sfx']).optional(), tag: z.string().optional() },
@@ -157,7 +230,7 @@ app.post('/mcp', async (req, res) => {
   server.registerTool('list_proposals', { description: 'Proposals and their review state.', annotations: read }, async () => text(await call('proposals')));
 
   server.registerTool('propose_changes', {
-    description: 'Stage an immutable proposal for human review; it never modifies the live project. Cite snapshotHash from read_project. Operations: code (whole file before/after), pixels, tiles (assetId or raw sprite), catalog (before/after, null to add or remove), sound (new MUSIC/SFX bundles in unused slots, optional samples), create_map, resize_map (only empty cells may be cut). Locked regions and changed content are refused when applied.',
+    description: 'Stage an immutable proposal for human review; it never modifies the live project. Cite snapshotHash from read_project. Operations: code (whole file before/after), pixels, tiles (assetId or raw sprite), catalog (before/after, null to add or remove), sound (new MUSIC/SFX bundles in unused slots, optional samples), create_map, resize_map (only empty cells may be cut), net_permissions (a net.state path, with clientRead/clientWrite and the value a session starts it at). A path with no declaration is OPEN to every client, so `remove` and clearing a bit both GIVE a client authority it did not have — say so in the summary, and expect the reviewer to see it flagged. Locked regions and changed content are refused when applied. A net_permissions operation changes how the next session begins; it does not touch a session already running.',
     inputSchema: proposalSchema.shape,
   }, async input => text(await call('proposals', proposalSchema.parse(input))));
 
@@ -448,7 +521,7 @@ app.post('/mcp', async (req, res) => {
   } catch {
     if (!res.headersSent) res.status(500).json({ error: 'MCP request failed' });
   }
-});
+}
 
 app.get('/healthz', (_req, res) => { res.json({ ok: true }); });
 

@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  adjacency, catalogStatus, type Context, designSfx, placeSection, proposalSchema, reachable,
-  resolveRoles, sha, tileHash, varyPattern,
+  adjacency, catalogStatus, type Context, designSfx, netPermissionRows, netReferencedPaths, netUndeclaredUsages, placeSection,
+  proposalSchema, reachable, resolveFlags, resolveRoles, sha, tileHash, varyPattern,
 } from '../src/native.js';
 
 function context(): Context {
@@ -71,4 +71,90 @@ test('pattern variations keep notes on the grid', () => {
   assert.deepEqual(varyPattern(source, 'invert', 0, 'v').pattern.notes.map(n => n.pitch), [67, 60]);
   assert.deepEqual(varyPattern(source, 'retrograde', 0, 'v').pattern.notes.map(n => n.step), [15, 10]);
   assert.equal(varyPattern(source, 'transpose', 100, 'v').pattern.notes.length, 0);
+});
+
+test('a path takes the permissions of the nearest ancestor that declares any', () => {
+  const declared = new Map([['players', 0], ['players.score', 1]]);
+  assert.equal(resolveFlags(declared, 'players.score'), 1, 'its own declaration wins');
+  assert.equal(resolveFlags(declared, 'players.name'), 0, 'the ancestor closes the rest');
+  assert.equal(resolveFlags(new Map(), 'anything'), null, 'unconfigured is open, not denied');
+  // A root entry of 0 closes the whole table; reading it as "unset" would open it instead.
+  assert.equal(resolveFlags(new Map([['', 0]]), 'deep.down.here'), 0);
+});
+
+test('the declared table says who may reach a path, and what a session starts it at', () => {
+  const rows = netPermissionRows({
+    ...context(),
+    netPermissions: {
+      'players.score': { flags: 1, default: 0 },
+      'secrets': { flags: 0 },
+    },
+  });
+  const byPath = Object.fromEntries(rows.map(row => [row['path'], row]));
+  assert.deepEqual(
+    { read: byPath['players.score']!['clientRead'], write: byPath['players.score']!['clientWrite'] },
+    { read: true, write: false },
+  );
+  assert.equal(byPath['players.score']!['default'], 0);
+  assert.equal(byPath['secrets']!['clientRead'], false);
+  assert.equal(byPath['secrets']!['clientWrite'], false);
+});
+
+test('a declaration nothing in the code mentions is worth pointing out', () => {
+  const c: Context = {
+    ...context(),
+    code: [{ id: 'main', name: 'main', text: 'net.state.players.score = 1\nnet.on("players.score", go)' }],
+    netPermissions: { 'players.score': { flags: 3 }, 'room.theme': { flags: 3 } },
+  };
+  assert.deepEqual([...netReferencedPaths(c)].sort(), ['players', 'players.score']);
+  const rows = netPermissionRows(c);
+  assert.equal(rows.find(r => r['path'] === 'players.score')!['referencedInCode'], true);
+  assert.equal(rows.find(r => r['path'] === 'room.theme')!['referencedInCode'], false);
+});
+
+test('a declaration the host would ignore is reported as malformed, not as private', () => {
+  // `netPermissionsOf` stores whatever `flags` is and the resolver skips anything that is not a
+  // number, so a malformed entry resolves as unconfigured — which is open. Reporting "private"
+  // here would be a confident answer about a boundary that is not in force.
+  const rows = netPermissionRows({ ...context(), netPermissions: { secrets: { default: 1 } as never } });
+  assert.equal(rows[0]!['invalid'], true);
+  assert.equal(rows[0]!['ownFlags'], null);
+  assert.equal(rows[0]!['clientRead'], true, 'unconfigured is open, which is what the host does');
+  assert.equal(rows[0]!['clientWrite'], true);
+});
+
+test('a declaration inside the lock/queue branch is not reported at all', () => {
+  const rows = netPermissionRows({
+    ...context(),
+    netPermissions: { 'room.__netobj__.q': { flags: 0 }, 'room': { flags: 3 } },
+  });
+  assert.deepEqual(rows.map(r => r['path']), ['room']);
+});
+
+test('a nested declaration does not leave its parents looking undeclared', () => {
+  const rows = netPermissionRows({
+    ...context(),
+    code: [{ id: 'main', name: 'main', text: 'net.state.players.score = 1' }],
+    netPermissions: { 'players.score': { flags: 1 } },
+  });
+  assert.deepEqual(rows.map((row) => row['path']), ['players.score']);
+  assert.deepEqual(netUndeclaredUsages({
+    ...context(),
+    code: [{ id: 'main', name: 'main', text: 'net.state.players.score = 1' }],
+    netPermissions: { 'players.score': { flags: 1 } },
+  }), [], 'players is implied by players.score, so it is not undeclared');
+  // A path with nothing above it really is undeclared.
+  assert.deepEqual(netUndeclaredUsages({
+    ...context(),
+    code: [{ id: 'main', name: 'main', text: 'net.state.room.theme = 1' }],
+    netPermissions: { 'players.score': { flags: 1 } },
+  }), ['room', 'room.theme']);
+});
+
+test('a row says which ancestor is closing it', () => {
+  const rows = netPermissionRows({ ...context(), netPermissions: { players: { flags: 0 }, 'players.score': { flags: 3 } } });
+  const score = rows.find(r => r['path'] === 'players.score')!;
+  assert.equal(score['inheritedFrom'], null, 'it declares its own');
+  const name = netPermissionRows({ ...context(), netPermissions: { players: { flags: 0 } } })[0]!;
+  assert.equal(name['clientRead'], false);
 });

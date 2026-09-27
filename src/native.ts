@@ -60,6 +60,14 @@ export const operationSchema = z.discriminatedUnion('kind', [
     kind: z.literal('resize_map'), mapId: id, beforeWidth: z.number().int().min(1).max(256), beforeHeight: z.number().int().min(1).max(256),
     width: z.number().int().min(1).max(256), height: z.number().int().min(1).max(256),
   }).strict(),
+  z.object({
+    kind: z.literal('net_permissions'),
+    // A declaration is a net.state path, the same shape the NET tab accepts.
+    path: z.string().min(1).max(128).regex(/^[a-z0-9_]+(\.[a-z0-9_]+)*$/i, 'A dotted net.state path, e.g. players.score'),
+    clientRead: z.boolean().optional(), clientWrite: z.boolean().optional(),
+    default: z.union([z.string().max(200), z.number(), z.boolean()]).nullable().optional(),
+    remove: z.literal(true).optional(),
+  }).strict(),
 ]);
 
 export const proposalSchema = z.object({
@@ -88,6 +96,127 @@ export interface Context {
   songs: Record<string, string>;
   sfx: Record<string, string>;
   samples: string[];
+  /**
+   * `net.permissions`: declared net.state paths, their client bits, and their starting values.
+   * Optional because a document saved before multiplayer declarations reached the assistant simply
+   * has no such key, and the service reads whatever the editor sent.
+   */
+  netPermissions?: Record<string, NetDeclaration>;
+}
+
+/** One declaration as the document holds it. `flags` is a bitfield: 1 read, 2 write. */
+export interface NetDeclaration { flags: number; default?: number | string | boolean }
+
+export const NET_CLIENT_READ = 1 << 0;
+export const NET_CLIENT_WRITE = 1 << 1;
+
+/**
+ * The permission record that applies to a path: its own, or the nearest configured ancestor's.
+ * Mirrors the editor's own resolution, including the rule that a root entry of 0 closes the whole
+ * table rather than reading as "unset" — which would open it.
+ */
+export function resolveFlags(entries: ReadonlyMap<string, number>, path: string): number | null {
+  let at = path;
+  for (;;) {
+    const flags = entries.get(at);
+    if (flags !== undefined) return flags;
+    const dot = at.lastIndexOf('.');
+    if (dot < 0) break;
+    at = at.slice(0, dot);
+  }
+  return entries.get('') ?? null;
+}
+
+/**
+ * Every net.state path the game's Lua names, and every ancestor of one, by text search.
+ *
+ * A hint, not a proof: a path assembled at runtime is not found, and a leaf found by search says
+ * nothing about whether the code writes it. It is still the difference between a table that
+ * describes the game and one nobody has kept up.
+ */
+export function netReferencedPaths(context: Context): Set<string> {
+  const sources = context.code.map((file) => file.text).join('\n');
+  const touched = new Set<string>();
+  for (const match of sources.matchAll(/net\.state((?:\.[A-Za-z0-9_]+)+)/g)) {
+    // The capture keeps the dot that separates it from `net.state`, so it is not yet a path.
+    const parts = match[1]!.slice(1).split('.');
+    // A parent of a referenced leaf is itself in play, even if only implicitly.
+    for (let i = parts.length; i > 0; i--) touched.add(parts.slice(0, i).join('.'));
+  }
+  return touched;
+}
+
+/**
+ * The declared multiplayer table, resolved and annotated.
+ *
+ * `referenced` is a text search over the game's Lua, so it is a hint and not a proof: a path
+ * assembled at runtime will not be found. It is here because the useful question is rarely "what
+ * is declared" but "what did somebody declare and then never touch".
+ */
+export const NET_RESERVED_SEGMENT = '__netobj__';
+
+export function netPermissionRows(context: Context): Record<string, unknown>[] {
+  const entries = Object.entries(context.netPermissions ?? {});
+  // The host's own resolver skips an entry whose flags are not a number, exactly as it skips an
+  // absent one, so resolution runs over the entries that really declare something and a malformed
+  // entry is reported as malformed rather than folded into an answer.
+  const declared = new Map(
+    entries
+      .filter(([path, d]) => typeof d?.flags === 'number')
+      .map(([path, d]) => [path, (d as NetDeclaration).flags] as [string, number]),
+  );
+  const touched = netReferencedPaths(context);
+  return entries
+    // The root entry is a whole-table setting with no path, and a declaration inside the reserved
+    // branch is not a permission at all: the host resolves against the owner's path, so reporting
+    // the entry's own flags would describe a boundary that does not exist, and could show a
+    // private-looking row for a value that is broadcast to every client.
+    .filter(([path]) => path !== '' && !path.split('.').includes(NET_RESERVED_SEGMENT))
+    .map(([path, declaration]) => {
+      const ownFlags = declared.get(path) ?? null;
+      const flags = resolveFlags(declared, path);
+      return {
+        path,
+        clientRead: flags === null ? true : (flags & NET_CLIENT_READ) !== 0,
+        clientWrite: flags === null ? true : (flags & NET_CLIENT_WRITE) !== 0,
+        ownFlags,
+        // Which ancestor's rule is in force: what a person needs to see to understand a parent
+        // that closes a whole subtree.
+        inheritedFrom: ownFlags === flags ? null : resolveOwner(declared, path),
+        // A declaration with no usable flags resolves as unconfigured, which is open.
+        invalid: ownFlags === null,
+        default: declaration?.default ?? null,
+        referencedInCode: touched.has(path),
+      };
+    })
+    .sort((a, b) => String(a['path']).localeCompare(String(b['path'])));
+}
+
+/**
+ * Paths the game names that nothing declares, ignoring the ones a declaration already implies.
+ *
+ * A child declaration implies its parents, so declaring `players.score` does not leave `players`
+ * undeclared — and telling the assistant otherwise invites a declaration for a container, which
+ * means nothing and, at the open default, documents an open parent.
+ */
+export function netUndeclaredUsages(context: Context): string[] {
+  const declared = netPermissionRows(context).map((row) => String(row['path']));
+  return [...netReferencedPaths(context)]
+    .filter((path) => !declared.some((other) => other === path || other.startsWith(`${path}.`)))
+    .sort();
+}
+
+/** The nearest ancestor that actually declares flags, for saying which rule is in force. */
+function resolveOwner(entries: ReadonlyMap<string, number>, path: string): string | null {
+  let at = path;
+  for (;;) {
+    const flags = entries.get(at);
+    if (flags !== undefined) return at === path ? null : at;
+    const dot = at.lastIndexOf('.');
+    if (dot < 0) break;
+    at = at.slice(0, dot);
+  }
+  return null;
 }
 
 export const pixelAt = (sheet: Sheet, x: number, y: number): number => parseInt(sheet.pixels[y * sheet.width + x] ?? '0', 16);

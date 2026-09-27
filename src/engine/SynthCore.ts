@@ -184,7 +184,8 @@ export class SynthCore {
     const q = 1 - Math.min(0.98, Math.max(0, ins.filter.resonance));
     // The Chamberlin filter's update is stable only while f² + 2fq < 4, i.e. f < √(q² + 4) − q.
     // Near Nyquist with little resonance a bright cutoff crosses that and the voice blows up into
-    // silence or clicks, so the coefficient stops just short of the bound: below it nothing changes.
+    // silence or clicks, so the coefficient stops 2% short of the bound: a filter already below
+    // that ceiling is untouched, and one in the last 2% is nudged down rather than left to blow up.
     const maxF = 0.98 * (Math.sqrt(q * q + 4) - q);
 
     for (let i = 0; i < frames; i++) {
@@ -264,7 +265,9 @@ export class SynthCore {
 
       // filter (Chamberlin SVF)
       if (filterOn) {
-        const cutoff = Math.min(sr * 0.45, ins.filter.cutoff * (1 + ins.filter.envAmount * v.env));
+        // Clamp the cutoff at 0 as well as at the stability bound: a negative envAmount drives it
+        // negative, f goes with it, and a negative f is unstable however small it is.
+        const cutoff = Math.max(0, Math.min(sr * 0.45, ins.filter.cutoff * (1 + ins.filter.envAmount * v.env)));
         const f = Math.min(maxF, 2 * Math.sin((Math.PI * cutoff) / sr));
         v.low += f * v.band;
         const high = s - v.low - q * v.band;

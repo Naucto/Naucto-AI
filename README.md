@@ -57,6 +57,12 @@ drift. Edit them in the Frontend, never here.
    deployments must sit behind HTTPS with an exact `NAUCTO_MCP_HOSTS`. Requests carrying an
    `Origin` header are refused: browsers never talk to this endpoint.
 
+   A long-lived assistant key works the same way: `Authorization: Bearer naucto_k_…`, plus
+   `X-Naucto-Project` when it covers more than one project. `NAUCTO_KEY` exists for a single-user
+   local client that cannot hold a credential; it is used only for a request with no
+   `Authorization` header, and the service will not start with it set unless `HOST` is loopback.
+   A credential it does not recognise is refused rather than answered with the server's own.
+
 ## Tools
 
 | Tool | Does |
