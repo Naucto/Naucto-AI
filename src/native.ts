@@ -32,6 +32,12 @@ export const assetSchema = z.object({
 const instrument = z.record(z.unknown());
 const pattern = z.record(z.unknown());
 
+/** A net.state declaration as the document holds it: the client bits (CLIENT_READ | CLIENT_WRITE), and a value a session starts at. */
+const netDeclaration = z.object({
+  flags: z.number().int().min(0).max(0b11),
+  default: z.union([z.string().max(200), z.number(), z.boolean()]).nullable().optional(),
+}).strict();
+
 export const operationSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('code'), fileId: id, before: z.string().max(100000), after: z.string().max(100000) }).strict(),
   z.object({
@@ -67,6 +73,11 @@ export const operationSchema = z.discriminatedUnion('kind', [
     clientRead: z.boolean().optional(), clientWrite: z.boolean().optional(),
     default: z.union([z.string().max(200), z.number(), z.boolean()]).nullable().optional(),
     remove: z.literal(true).optional(),
+    // What the path is expected to hold when this is applied, or null to mean it holds nothing. The
+    // Backend refuses a declaration without one, and `propose_changes` fills it in from the state
+    // this call was made against, so the model never has to remember it: if somebody changed the
+    // declaration in the meantime, the application is refused instead of overwriting them.
+    expect: z.union([netDeclaration, z.null()]).optional(),
   }).strict(),
 ]);
 
@@ -154,6 +165,20 @@ export function netReferencedPaths(context: Context): Set<string> {
  * is declared" but "what did somebody declare and then never touch".
  */
 export const NET_RESERVED_SEGMENT = '__netobj__';
+
+/**
+ * What a net_permissions operation at `path` should expect to find, read from the state this call
+ * was made against: the declaration as it stands, or null when the path declares nothing.
+ *
+ * A declaration with no expectation is one the Backend refuses. Filling it here means the model
+ * never has to construct it, and a colleague who changed the declaration between this read and the
+ * application turns the change into a conflict instead of an overwrite.
+ */
+export function netPermissionExpectation(context: Context, path: string): NetDeclaration | null {
+  const entry = context.netPermissions?.[path];
+  if (entry === undefined || typeof entry?.flags !== 'number' || !Number.isFinite(entry.flags)) return null;
+  return { flags: entry.flags, ...(entry.default === undefined ? {} : { default: entry.default }) };
+}
 
 export function netPermissionRows(context: Context): Record<string, unknown>[] {
   const entries = Object.entries(context.netPermissions ?? {});

@@ -8,7 +8,7 @@ import { configured, generate, generationSchema, GenerationQueue, type Ledger, p
 import { draftLevel, platformReachable } from './levels.js';
 import { convertMidi, readMidi } from './engine/midi.js';
 import {
-  adjacency, catalogStatus, type Context, designSfx, mapRegion, NET_CLIENT_READ, NET_CLIENT_WRITE, netPermissionRows, netUndeclaredUsages, placeSection,
+  adjacency, catalogStatus, type Context, designSfx, mapRegion, NET_CLIENT_READ, NET_CLIENT_WRITE, netPermissionExpectation, netPermissionRows, netUndeclaredUsages, placeSection,
   proposalSchema, reachable, resolveFlags, resolveRoles, SFX_KINDS, sha, sheetRegion, tileHash, varyPattern,
 } from './native.js';
 import { Canvas, gridPicture, image, sideBySide, stacked, tiled } from './render.js';
@@ -232,7 +232,21 @@ async function serve(req: Parameters<express.RequestHandler>[0], res: Parameters
   server.registerTool('propose_changes', {
     description: 'Stage an immutable proposal for human review; it never modifies the live project. Cite snapshotHash from read_project. Operations: code (whole file before/after), pixels, tiles (assetId or raw sprite), catalog (before/after, null to add or remove), sound (new MUSIC/SFX bundles in unused slots, optional samples), create_map, resize_map (only empty cells may be cut), net_permissions (a net.state path, with clientRead/clientWrite and the value a session starts it at). A path with no declaration is OPEN to every client, so `remove` and clearing a bit both GIVE a client authority it did not have — say so in the summary, and expect the reviewer to see it flagged. Locked regions and changed content are refused when applied. A net_permissions operation changes how the next session begins; it does not touch a session already running.',
     inputSchema: proposalSchema.shape,
-  }, async input => text(await call('proposals', proposalSchema.parse(input))));
+  }, async input => {
+    const parsed = proposalSchema.parse(input);
+    // A net_permissions operation has to say what it expects to find, and the Backend refuses one
+    // that does not. It is filled in here, from the same state `snapshotHash` came from, so the
+    // model never constructs it and a declaration somebody changed in the meantime is a conflict
+    // rather than a silent overwrite. Any expectation the model did state is left alone: it is
+    // usually a revert, whose whole point is to meet a different state.
+    const declared = await context();
+    const operations = parsed.operations.map(operation =>
+      operation.kind === 'net_permissions' && operation.expect === undefined
+        ? { ...operation, expect: netPermissionExpectation(declared.content, operation.path) }
+        : operation,
+    );
+    return text(await call('proposals', { ...parsed, operations }));
+  });
 
   server.registerTool('place_section', {
     description: 'Build a tiles operation that stamps a catalogued map section at (x, y) on a map. Locked cells are skipped and listed. Returns an operation to submit; writes nothing.',

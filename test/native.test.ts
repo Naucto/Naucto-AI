@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  adjacency, catalogStatus, type Context, designSfx, netPermissionRows, netReferencedPaths, netUndeclaredUsages, placeSection,
+  adjacency, catalogStatus, type Context, designSfx, netPermissionExpectation, netPermissionRows, operationSchema, netReferencedPaths, netUndeclaredUsages, placeSection,
   proposalSchema, reachable, resolveFlags, resolveRoles, sha, tileHash, varyPattern,
 } from '../src/native.js';
 
@@ -157,4 +157,23 @@ test('a row says which ancestor is closing it', () => {
   assert.equal(score['inheritedFrom'], null, 'it declares its own');
   const name = netPermissionRows({ ...context(), netPermissions: { players: { flags: 0 } } })[0]!;
   assert.equal(name['clientRead'], false);
+});
+
+test('a declaration carries what it expects to find, so a change to it is a conflict and not an overwrite', () => {
+  // The Backend refuses a net_permissions operation with no expectation. Filling it in from the
+  // state the proposal was written against is what makes that safe rather than merely strict: a
+  // colleague who changes the declaration in the meantime is a conflict, not a silent overwrite.
+  const c: Context = { ...context(), netPermissions: { 'players.score': { flags: 3, default: 1 } } };
+  assert.deepEqual(netPermissionExpectation(c, 'players.score'), { flags: 3, default: 1 });
+
+  // A path that declares nothing expects nothing.
+  assert.equal(netPermissionExpectation(c, 'players.other'), null);
+  // A malformed entry stores no flags, so the host resolves it as unconfigured; expecting a
+  // declaration there would be believing one the engine does not read.
+  assert.equal(netPermissionExpectation({ ...c, netPermissions: { bad: { default: 1 } as never } }, 'bad'), null);
+
+  // And the model can still state its own, which is what a revert does.
+  const parsed = operationSchema.parse({ kind: 'net_permissions', path: 'players.score', remove: true, expect: { flags: 3 } });
+  assert.equal(parsed.kind, 'net_permissions');
+  assert.deepEqual(parsed.kind === 'net_permissions' ? parsed.expect : undefined, { flags: 3 });
 });
