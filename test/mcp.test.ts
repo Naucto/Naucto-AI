@@ -11,7 +11,10 @@ import { decodePng } from '../src/png.js';
  * instance instead of importing a second one at a second port.
  */
 const shared: {
+  /** A key reaching one project, so it is never asked to choose anything. */
+  singleToken: string;
   multiToken: string;
+  victimToken: string;
   scopes: string[];
   url: URL | null;
   /** Flipped by the test that revokes a grant, so the stub behaves like the Backend does. */
@@ -19,7 +22,9 @@ const shared: {
   revoke: () => void;
   unlink: () => void;
 } = {
+  singleToken: `naucto_ai_${'a'.repeat(64)}`,
   multiToken: '',
+  victimToken: '',
   scopes: [],
   url: null,
   revoked: false,
@@ -47,7 +52,12 @@ test('HTTP MCP: authenticated, paginated reads, no self-approval, generation dis
   // allowlist and the remembered selections are both read when it loads, so a second instance would
   // have to be built from a second port and a second import.
   const MULTI = `naucto_ai_${'b'.repeat(64)}`;
+  // A second key reaching the same two projects, so the eviction test has a bystander that has made
+  // a choice worth losing.
+  const VICTIM = `naucto_ai_${'c'.repeat(64)}`;
   shared.multiToken = MULTI;
+  shared.victimToken = VICTIM;
+  const TWO_PROJECT_KEYS = new Set([MULTI, VICTIM]);
   const scopes = shared.scopes;
   const backend = createServer((req, res) => {
     assert.match(String(req.headers.authorization), /^Bearer naucto_(ai|k)_/);
@@ -55,7 +65,7 @@ test('HTTP MCP: authenticated, paginated reads, no self-approval, generation dis
     const scope = String(req.headers['x-naucto-project'] ?? '');
     seen.push(`${req.method} ${req.url}`);
     res.setHeader('content-type', 'application/json');
-    if (bearer === MULTI) {
+    if (TWO_PROJECT_KEYS.has(bearer)) {
       // A key reaching two games: the Backend refuses to guess, so a session has to choose. It also
       // narrows its own reachability list to the hinted project, which is what makes a stale or wrong
       // selection visible here — a stub that ignored the header could not tell the difference.
@@ -77,6 +87,10 @@ test('HTTP MCP: authenticated, paginated reads, no self-approval, generation dis
     }
     assert.equal(bearer, token);
     if (req.url === '/ai/mcp/connection') res.end(JSON.stringify({ projectId: 7, userId: 1 }));
+    else if (req.url === '/ai/mcp/projects') {
+      // One project, so nothing is asked to choose and no header is ever sent.
+      res.end(JSON.stringify([{ projectId: 7, userId: 1, name: 'Solo', contextUpdatedAt: new Date(0).toISOString(), contextAgeMs: 5, pendingProposals: 0 }]));
+    }
     else if (req.url === '/ai/mcp/context') res.end(JSON.stringify({ hash: 'a'.repeat(64), content }));
     else { res.statusCode = 404; res.end('{}'); }
   }).listen(0, '127.0.0.1');
@@ -273,3 +287,44 @@ function text(result: unknown): string {
 function toolJson(result: unknown): Record<string, unknown> {
   return JSON.parse(text(result)) as Record<string, unknown>;
 }
+
+test('flooding the map with one key does not flush another key\'s choice', async () => {
+  // The selection map is bounded. Evicting the globally oldest entry meant anyone holding a key could
+  // flush every other holder's choices just by opening conversations with made-up session ids — and
+  // a conversation that forgets its project mid-sentence is one that stops working. Eviction takes
+  // the flooding credential's own entries first.
+  const url = shared.url;
+  assert.ok(url, 'the shared MCP server was not started');
+  const connect = async (token: string): Promise<Client> => {
+    const client = new Client({ name: 'test', version: '1' });
+    await client.connect(new StreamableHTTPClientTransport(url, {
+      requestInit: { headers: { authorization: `Bearer ${token}` } },
+    }));
+    return client;
+  };
+
+  // A bystander that has chosen a project, which is what the flooder must not cost it.
+  const victim = await connect(shared.victimToken);
+  await victim.callTool({ name: 'use_project', arguments: { projectId: 11 } });
+  const flooder = await connect(shared.multiToken);
+  try {
+
+    // More distinct conversations on the flooder's key than the map holds.
+    for (let i = 0; i < 1100; i += 1) {
+      const c = await connect(shared.multiToken);
+      await c.callTool({ name: 'use_project', arguments: { projectId: i % 2 ? 11 : 22 } });
+      await c.close();
+    }
+
+    // Still on the project it chose, and still able to read.
+    const listed = toolJson(await victim.callTool({ name: 'list_projects', arguments: {} }));
+    assert.equal(listed['currentProjectId'], 11);
+    // And it can still read, which it could not if the flood had taken its choice: with nothing
+    // remembered it is told to choose, and every other tool refuses.
+    const read = await victim.callTool({ name: 'read_project', arguments: {} });
+    assert.equal(read.isError, undefined);
+  } finally {
+    await victim.close();
+    await flooder.close();
+  }
+});

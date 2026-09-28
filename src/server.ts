@@ -77,6 +77,8 @@ const selectionFor = (token: string, session: string): string => selections.get(
 // which can be the entry of a conversation still in progress: it forgets its project and is told to
 // choose again rather than acting on the wrong one.
 const SELECTION_LIMIT = 1000;
+// Which credential each entry belongs to, so eviction can prefer the one that caused it. Keyed the
+// same way as `selections`, so an entry is dropped from both together.
 const owners = new Map<string, string>();
 const remember = (token: string, session: string, project: string): void => {
   const key = selectionKey(token, session);
@@ -90,11 +92,7 @@ const remember = (token: string, session: string, project: string): void => {
     const evicted = mine ?? selections.keys().next().value;
     if (evicted !== undefined) {
       selections.delete(evicted);
-      const gone = owners.get(evicted);
-      if (gone !== undefined) {
-        owners.delete(evicted);
-        if (![...owners.values()].includes(gone)) owners.delete(owner);
-      }
+      owners.delete(evicted);
     }
   }
   selections.set(key, project);
