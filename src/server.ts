@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -63,6 +63,12 @@ const selections = new Map<string, string>();
  */
 const selectionKey = (token: string, session: string): string =>
   createHash('sha256').update(`${token}\u0000${session}`).digest('hex');
+/** The first message of a conversation, the one an id is issued for. */
+const isInitialize = (req: { body?: unknown }): boolean => {
+  const body = req.body as { method?: string; jsonrpc?: string } | undefined;
+  return body?.jsonrpc === '2.0' && body?.method === 'initialize';
+};
+
 const selectionFor = (token: string, session: string): string => selections.get(selectionKey(token, session)) ?? '';
 // Bounded, so it cannot grow without limit. Selecting again re-keys an existing entry, so the size is
 // a high-water mark of distinct sessions rather than of distinct projects. The oldest goes first,
@@ -104,7 +110,15 @@ app.post('/mcp', async (req, res) => {
   // The MCP session this request belongs to: one conversation is many requests sharing one id, and
   // two conversations on one credential are told apart by it. A client that sends none is treated as
   // one conversation per credential, which is the best that can be done without an id to go on.
-  const session = typeof req.headers['mcp-session-id'] === 'string' ? req.headers['mcp-session-id'] : '';
+  let session = typeof req.headers['mcp-session-id'] === 'string' ? req.headers['mcp-session-id'] : '';
+  if (!session && isInitialize(req)) {
+    // An id is issued here rather than only read, because a client sends one only after being given
+    // one: the SDK echoes back `mcp-session-id` from the initialize response, and never invents
+    // one. So a server that only reads the header sees none from every real client, and every
+    // conversation on a key quietly shares whichever choice was made last.
+    session = randomUUID();
+    res.setHeader('mcp-session-id', session);
+  }
   // The client's own credential, of either kind, and only that one. Falling back to the server's
   // key when a client sent something we did not recognise would serve identity A as identity B.
   const sent = req.headers.authorization?.match(/^Bearer ((?:naucto_ai|naucto_k)_[a-f0-9]{64})$/)?.[1];
@@ -210,10 +224,15 @@ async function serve(
     description: `Every project this key may reach, with the name of each, how old the state it exposes is, and how many changes are waiting there, and which one this session is working on. Use it first when a key covers more than one game: nothing else works until one is chosen with use_project, and it is refused rather than guessed. ${UNTRUSTED}`,
     annotations: read,
   }, async () => {
+    // Listed with no project hint, so this answers "what may this key reach?" rather than "what
+    // does it reach here?". The Backend narrows its list to the project named in the header, so
+    // sending the current one would report a single project and `multiProject: false` the moment
+    // one was chosen — leaving a model that wanted to switch with nothing to switch to, and no way
+    // to learn the alternatives exist. The current choice is reported alongside, not filtered by.
     const projects = z.array(z.object({
       projectId: z.number().int(), userId: z.number().int(), name: z.string(),
       contextUpdatedAt: z.string().nullable(), contextAgeMs: z.number().nullable(), pendingProposals: z.number().int().nonnegative(),
-    })).parse(await call('projects'));
+    })).parse(await call('projects', undefined, false, ''));
     return text({
       projects,
       // Which one the next call will act on, so a model that has already chosen does not have to

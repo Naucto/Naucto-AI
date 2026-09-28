@@ -192,8 +192,10 @@ test('a key that reaches several games picks one and works there, and refuses un
     assert.deepEqual(shared.scopes, ['22', '22', '11']);
     const nowOn = toolJson(await client.callTool({ name: 'list_projects', arguments: {} }));
     assert.equal(nowOn['currentProjectId'], 11);
-    // The Backend narrows this list to the selected project, so it lists one here. The move itself
-    // still works because `use_project` checks the unhinted list — which is the point of the fix.
+    // Both are still listed, and `multiProject` still says so. Reporting one here would leave a
+    // model that wanted to switch with nothing to switch to and no way to learn the others exist.
+    assert.equal((nowOn['projects'] as { projectId: number }[]).length, 2);
+    assert.equal(nowOn['multiProject'], true);
   } finally {
     await client.close();
   }
@@ -204,15 +206,16 @@ test('two conversations on one key choose independently', async () => {
   // mid-sentence: the key is the same, so they shared one remembered project.
   const url = shared.url;
   assert.ok(url, 'the shared MCP server was not started');
-  // Distinct session ids, as two real conversations would have: this service does not run a
-  // session-generating transport, so a client has to send one for the two to be told apart.
-  const connect = async (id: string): Promise<Client> => {
+  // No `mcp-session-id` set by hand: a real client never sends one, because it only echoes an id
+  // the server gave it. So both of these are ordinary clients, and the ids have to come from the
+  // initialize responses for the two to be told apart at all.
+  const connect = async (): Promise<Client> => {
     const client = new Client({ name: 'test', version: '1' });
-    await client.connect(new StreamableHTTPClientTransport(url, { requestInit: { headers: { authorization: `Bearer ${shared.multiToken}`, 'mcp-session-id': id } } }));
+    await client.connect(new StreamableHTTPClientTransport(url, { requestInit: { headers: { authorization: `Bearer ${shared.multiToken}` } } }));
     return client;
   };
-  const first = await connect('conversation-one');
-  const second = await connect('conversation-two');
+  const first = await connect();
+  const second = await connect();
   try {
     await first.callTool({ name: 'use_project', arguments: { projectId: 11 } });
     // The other conversation never chose, and must not have been moved by the first one.

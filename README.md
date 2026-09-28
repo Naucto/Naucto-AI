@@ -118,6 +118,12 @@ picks the game, and the choice holds for the rest of the session — including a
 HTTP requests an MCP session is made of — so one conversation can move between the projects a key
 reaches. A project id the key may not open is refused at the choice, before anything is sent on.
 
+The choice is per conversation, not per key. An id is issued in the `mcp-session-id` header of the
+`initialize` response, which is the only way a client comes to send one, so two conversations on
+one key do not steer each other. A client that sends no `mcp-session-id` at all — a hand-rolled one,
+or a proxy that strips it — is treated as a single conversation on that key, so a second one would
+inherit the first's choice until the process restarts.
+
 A client's own `X-Naucto-Project` header still takes precedence, and an 8-hour project token is
 pinned to its single project: the Backend refuses a hint that contradicts one, so `use_project`
 reports that refusal rather than appearing to switch.
