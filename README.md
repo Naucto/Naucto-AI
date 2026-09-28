@@ -5,9 +5,10 @@ project: read it, draw sprites and compose sound with tools that show the result
 propose changes. PixelLab can be asked for a second opinion on sprites.
 
 The assistant **proposes**; a person **applies**. Every change is an immutable proposal that a
-project editor inspects in Naucto, where applying it pauses every open editor, merges their exact
-state, and commits one result. Nothing the assistant does can approve, publish, delete or manage a
-project.
+project editor inspects in Naucto, in the assistant's own section of the GAME tab. Accepting sends
+the document as the accepting person has it, so the change merges into what they are looking at
+rather than replacing it, and nobody's editor is paused, unmounted or interrupted. Nothing the
+assistant does can approve, publish, delete or manage a project.
 
 ```
 Claude / Codex ──MCP (HTTP, project token)──▶ Naucto-AI ──▶ Backend (/ai/mcp/*)
@@ -20,8 +21,8 @@ Claude / Codex ──MCP (HTTP, project token)──▶ Naucto-AI ──▶ Back
 
 ```
 EIP/
-  Backend/    feat/naucto-ai  — proposals, barrier, jobs ledger, provenance (NestJS + Prisma)
-  Frontend/   feat/naucto-ai  — AI dialog, previews, catalog/locks, music import, badges (Angular)
+  Backend/    feat/naucto-ai  — proposals, apply, jobs ledger, provenance (NestJS + Prisma)
+  Frontend/   feat/naucto-ai  — assistant panel, previews, catalog/locks, music import, badges (Angular)
   Naucto-AI/  this repository — MCP service, pictures, offline synth, generation queue
 ```
 
@@ -40,7 +41,7 @@ drift. Edit them in the Frontend, never here.
 3. **This service**: `npm ci`, export the variables in `.env.example` (it does not load `.env`), then
    `npm start`. Or `docker compose up` beside the Backend (`NAUCTO_NETWORK` names its network).
    Build the docs (`npm run docs:build` in Frontend) for `search_engine_docs`.
-4. In a project, open **AI tools → Connect / rotate token**. The token is scoped to that project and
+4. In a project, open **GAME → Connect / rotate token**. The token is scoped to that project and
    that person, lasts eight hours, and is revoked by **Disconnect AI**. The editor shares its
    current state (unsaved work included) every 20 s while the dialog is open.
 5. Register the service in your client:
@@ -91,8 +92,10 @@ returned as data and the service instructs the client not to follow instructions
 ## Proposals
 
 `propose_changes` takes `{ title, summary, snapshotHash, operations }`. The Backend validates every
-operation against the merged state of all paused editors when applying; a change to anything a
-proposal read makes it refuse rather than overwrite.
+operation against the document the accepting person actually had, not against a copy taken when the
+proposal was written; a change to anything that moved underneath it is refused rather than merged
+over. That means a proposal written against a stale read has to be redone, which `read_project` will
+tell you is the case by its `stateAgeMs`.
 
 | Operation | Notes |
 |---|---|
@@ -103,6 +106,9 @@ proposal read makes it refuse rather than overwrite.
 | `sound` | A new MUSIC or SFX bundle in unused slots: `instruments`, `patterns`, optional `samples` (base64 signed 8-bit mono, 8 kHz, ≤ 8192 bytes) and `song` |
 | `create_map` | A new level of catalogued tiles (`assets`, row-major, `null` = empty) with its brief in `ai.levels` |
 | `resize_map` | Grow or shrink; shrinking may only remove empty cells |
+| `delete_map` | Removes a level. Records no inverse, so a change containing one cannot be reverted as a whole |
+| `delete_sound` | Empties a sound slot. Records no inverse, likewise |
+| `net_permissions` | A `net.state` path, with `clientRead`/`clientWrite` and the value a session starts it at. `propose_changes` fills in `expect` from the state it read; a declaration somebody changed in the meantime is refused rather than overwritten |
 
 **Locked regions** (set by people in *Catalog & locks*) are never written. **Catalog annotations**
 are human metadata: they never mark artwork as AI-made, and gameplay semantics other than
@@ -110,18 +116,24 @@ are human metadata: they never mark artwork as AI-made, and gameplay semantics o
 
 ## Applying, conflicts and recovery
 
-Approving a proposal *is* applying it. Every open editor heartbeats; applying requires the set of
-editors the Backend sees to equal the set the approver's session sees, pauses them all, and waits
-for each one's full document state. Anything that reaches a paused editor afterwards is reported
-with the update itself: before the commit, the application stops unless one of the snapshots
-already holds that update (a peer's last edit arriving late, which is normal); after it, the result
-is flagged for a person to check. The committed result is stored before it is saved, so a storage
-failure is resumed with **Finish / recover**, never replayed. Saves, autosaves and publishing wait
-while an application is in progress.
+Approving a proposal *is* applying it. The accepting editor sends its document, the operations are
+validated and merged into it, and the merged state comes back to be applied locally — the same
+update y-webrtc already carries, so every other tab in the session receives it over the ordinary
+sync. Because a whole state is returned rather than a difference cut against the accepting tab, a
+collaborator that has not yet received the acceptor's own keystrokes still gets the change whole.
+
+A refusal means the document moved underneath the proposal: the text a `code` operation expected is
+not the text there, a declaration is not the one that was read, or a locked region is in the way.
+Redo it from a fresh `read_project`. If two people accept the same proposal, one of them is told it
+was already reviewed; the other gets the change.
+
+## Reverts and recovery
 
 **Reverts** are proposals too. The inverse of every operation is captured from the merged state at
 commit, so a revert restores exactly what was replaced — and refuses if anyone changed it since.
-Created levels and sound bundles are removed only while untouched.
+Created levels and sound bundles are removed only while untouched. A proposal that deleted a level or
+emptied a sound slot cannot be reverted at all, because there is no description of what to put back;
+the Backend says so and points at version history.
 
 ## Provenance
 
@@ -133,7 +145,7 @@ release; the game page and cards show them. MIDI a person imports is not AI prov
 ## Specialist generation
 
 Jobs live in the Backend (`AiJob`): quota and cancellation are enforced there, editors see and cancel
-them in **AI tools → Generation**, and only this service (holding `AI_SERVICE_SECRET`) can store a
+them in **GAME → Generation**, and only this service (holding `AI_SERVICE_SECRET`) can store a
 result, with the identifier of the model that produced it. A job interrupted by a restart fails
 instead of being paid for twice. Results are drafts: they reach a game only through a proposal.
 
