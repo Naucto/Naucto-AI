@@ -53,15 +53,36 @@ if (assistantKey && !local) {
 // that contradicts an 8-hour project token, so a project token stays pinned to its one project no
 // matter what is remembered here.
 const selections = new Map<string, string>();
-/** A digest, so a remembered selection is not a copy of a credential sitting in a map. */
-const selectionKey = (token: string): string => createHash('sha256').update(token).digest('hex');
-const selectionFor = (token: string): string => selections.get(selectionKey(token)) ?? '';
-// Bounded, so it cannot grow without limit: selecting again overwrites, so the size is a high-water
-// mark of distinct credentials rather than of distinct projects.
+/**
+ * A digest, so a remembered selection is not a copy of a credential sitting in a map.
+ *
+ * Keyed by the credential *and* the MCP session, not the credential alone. An MCP session is made of
+ * separate HTTP requests, and the server is rebuilt on each one, so the choice has to survive between
+ * them — but two conversations sharing one key are two conversations: keyed by the key alone, one
+ * model's `use_project` silently retargeted another's mid-sentence.
+ */
+const selectionKey = (token: string, session: string): string =>
+  createHash('sha256').update(`${token}\u0000${session}`).digest('hex');
+const selectionFor = (token: string, session: string): string => selections.get(selectionKey(token, session)) ?? '';
+// Bounded, so it cannot grow without limit. Selecting again re-keys an existing entry, so the size is
+// a high-water mark of distinct sessions rather than of distinct projects. The oldest goes first,
+// which can be the entry of a conversation still in progress: it forgets its project and is told to
+// choose again rather than acting on the wrong one.
 const SELECTION_LIMIT = 1000;
-const remember = (token: string, project: string): void => {
-  if (selections.size >= SELECTION_LIMIT && !selections.has(selectionKey(token))) selections.delete(selections.keys().next().value as string);
-  selections.set(selectionKey(token), project);
+const remember = (token: string, session: string, project: string): void => {
+  const key = selectionKey(token, session);
+  if (selections.size >= SELECTION_LIMIT && !selections.has(key)) selections.delete(selections.keys().next().value as string);
+  selections.set(key, project);
+};
+/**
+ * Forget a remembered choice, which is what a selection that has stopped being reachable calls for.
+ *
+ * Without this, a key whose grant on the chosen project is revoked is locked out of the session that
+ * chose it: every request would name a project the Backend refuses, and since the server is never
+ * built, `use_project` — the only way to change it — is unreachable. The key still reaches the others.
+ */
+const forget = (token: string, session: string): void => {
+  selections.delete(selectionKey(token, session));
 };
 
 const providers = providersFromEnv(process.env);
@@ -80,25 +101,41 @@ app.post('/mcp', async (req, res) => {
     return;
   }
   const hint = typeof req.headers['x-naucto-project'] === 'string' ? req.headers['x-naucto-project'] : '';
+  // The MCP session this request belongs to: one conversation is many requests sharing one id, and
+  // two conversations on one credential are told apart by it. A client that sends none is treated as
+  // one conversation per credential, which is the best that can be done without an id to go on.
+  const session = typeof req.headers['mcp-session-id'] === 'string' ? req.headers['mcp-session-id'] : '';
   // The client's own credential, of either kind, and only that one. Falling back to the server's
   // key when a client sent something we did not recognise would serve identity A as identity B.
   const sent = req.headers.authorization?.match(/^Bearer ((?:naucto_ai|naucto_k)_[a-f0-9]{64})$/)?.[1];
-  if (sent) return serve(req, res, sent, hint || selectionFor(sent));
+  if (sent) return serve(req, res, sent, { session, hint, remembered: selectionFor(sent, session) });
   if (req.headers.authorization) {
     res.status(401).json({ error: 'Unrecognised credential' });
     return;
   }
   // Nothing sent at all, and this is a loopback bind (see above): the owner at this machine.
-  if (assistantKey) return serve(req, res, assistantKey, assistantProject || hint || selectionFor(assistantKey));
+  // The order is a model's choice, then the client's header, then the environment default. A
+  // remembered choice outranks NAUCTO_PROJECT, which names a default rather than an instruction —
+  // otherwise `use_project` would report success and the next request would go somewhere else, and
+  // the two would quietly disagree about which project the session is on.
+  if (assistantKey) {
+    return serve(req, res, assistantKey, { session, hint, remembered: selectionFor(assistantKey, session) || assistantProject });
+  }
   res.status(401).json({ error: 'An assistant key or a project token is required' });
 });
 
 /** One authenticated request: check the credential, then build the MCP server around it. */
-async function serve(req: Parameters<express.RequestHandler>[0], res: Parameters<express.RequestHandler>[1], token: string, scope: string): Promise<void> {
+async function serve(
+  req: Parameters<express.RequestHandler>[0],
+  res: Parameters<express.RequestHandler>[1],
+  token: string,
+  scope: { session: string; hint: string; remembered: string },
+): Promise<void> {
   // Which project this session is working on. A header from the client wins and is authoritative —
-  // the Backend refuses one that contradicts an 8-hour project token — and `use_project` can change
-  // it for an account key, so one session can move between the games a key reaches.
-  let project = scope;
+  // the Backend refuses one that contradicts an 8-hour project token — then a choice this session
+  // made, then the environment default. So one session can move between the games a key reaches,
+  // and the move is what the next request uses.
+  let project = scope.hint || scope.remembered;
   // True only when the Backend said this key reaches several games, so nothing is pointed at yet.
   // A key that covers one project needs no header at all — the Backend resolves it — so an empty
   // scope is perfectly ordinary and must not be treated as "not chosen yet".
@@ -134,14 +171,26 @@ async function serve(req: Parameters<express.RequestHandler>[0], res: Parameters
     z.object({ projectId: z.number().int(), userId: z.number().int() }).parse(await call('connection'));
   } catch (error) {
     const message = error instanceof Error ? error.message : '';
-    if (!/several projects|more than one/i.test(message)) {
+    // A project this credential no longer reaches — a grant revoked, a collaborator removed. If the
+    // name came from this session's own choice, the choice is dropped and the session is asked to
+    // choose again: otherwise every request would name a project the Backend refuses, the server
+    // would never be built, and `use_project` — the only way to change it — would be unreachable. A
+    // name the client sent itself is refused instead, since that is the client's instruction failing
+    // and it is the client's to correct.
+    const unreachable = /not linked to that project|not a collaborator|no longer/i.test(message);
+    if (unreachable && scope.remembered && project === scope.remembered) {
+      forget(token, scope.session);
+      mustChoose = true;
+      project = '';
+    } else if (!/several projects|more than one/i.test(message)) {
       res.status(401).json({ error: message || 'AI connection expired or revoked' });
       return;
+    } else {
+      // Authenticated, but it reaches several games and has not chosen one: everything except
+      // discovery is refused until `use_project` says which.
+      mustChoose = true;
+      project = '';
     }
-    // Authenticated, but it reaches several games and has not chosen one: everything except
-    // discovery is refused until `use_project` says which.
-    mustChoose = true;
-    project = '';
   }
 
   const ledger: Ledger = {
@@ -180,7 +229,12 @@ async function serve(req: Parameters<express.RequestHandler>[0], res: Parameters
     inputSchema: { projectId: z.number().int() },
     annotations: { readOnlyHint: false, destructiveHint: false },
   }, async ({ projectId }) => {
-    const projects = z.array(z.object({ projectId: z.number().int() })).parse(await call('projects'));
+    // Listed with no project hint, deliberately. The Backend narrows its reachability list to the
+    // hinted project, so asking "what may this key reach?" while a project is already chosen answers
+    // with that one project — and every other project the key reaches then looks out of bounds. A
+    // session that had chosen once could never move again, and `list_projects` would quietly report
+    // a single project.
+    const projects = z.array(z.object({ projectId: z.number().int() })).parse(await call('projects', undefined, false, ''));
     // Checked against what the key may actually reach, rather than sent straight through: a header
     // naming a project this key cannot open must fail here, not as an opaque refusal later.
     if (!projects.some(entry => entry.projectId === projectId)) {
@@ -193,7 +247,7 @@ async function serve(req: Parameters<express.RequestHandler>[0], res: Parameters
     const connection = z.object({ projectId: z.number().int(), name: z.string().optional() }).parse(
       await call('connection', undefined, false, wanted),
     );
-    remember(token, wanted);
+    remember(token, scope.session, wanted);
     project = wanted;
     return text({ projectId: connection.projectId, name: connection.name ?? null, current: true });
   });
