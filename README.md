@@ -106,9 +106,12 @@ tell you is the case by its `stateAgeMs`.
 | `sound` | A new MUSIC or SFX bundle in unused slots: `instruments`, `patterns`, optional `samples` (base64 signed 8-bit mono, 8 kHz, ≤ 8192 bytes) and `song` |
 | `create_map` | A new level of catalogued tiles (`assets`, row-major, `null` = empty) with its brief in `ai.levels` |
 | `resize_map` | Grow or shrink; shrinking may only remove empty cells |
-| `delete_map` | Removes a level. Records no inverse, so a change containing one cannot be reverted as a whole |
-| `delete_sound` | Empties a sound slot. Records no inverse, likewise |
 | `net_permissions` | A `net.state` path, with `clientRead`/`clientWrite` and the value a session starts it at. `propose_changes` fills in `expect` from the state it read; a declaration somebody changed in the meantime is refused rather than overwritten |
+
+These eight are what this tool accepts. The Backend understands two more — `delete_map` and
+`delete_sound` — which it refuses to revert, because a deleted level or sound cannot be described
+well enough to put back. Nothing here can submit them, so a change that removes artwork is out of
+reach of the assistant by design.
 
 **Locked regions** (set by people in *Catalog & locks*) are never written. **Catalog annotations**
 are human metadata: they never mark artwork as AI-made, and gameplay semantics other than
