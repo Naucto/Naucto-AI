@@ -267,7 +267,10 @@ export class SynthCore {
       if (filterOn) {
         // Clamp the cutoff at 0 as well as at the stability bound: a negative envAmount drives it
         // negative, f goes with it, and a negative f is unstable however small it is.
-        const cutoff = Math.max(0, Math.min(sr * 0.45, ins.filter.cutoff * (1 + ins.filter.envAmount * v.env)));
+        const cutoff = Math.max(
+          0,
+          Math.min(sr * 0.45, ins.filter.cutoff * (1 + ins.filter.envAmount * v.env)),
+        );
         const f = Math.min(maxF, 2 * Math.sin((Math.PI * cutoff) / sr));
         v.low += f * v.band;
         const high = s - v.low - q * v.band;
