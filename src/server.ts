@@ -63,6 +63,8 @@ const selections = new Map<string, string>();
  */
 const selectionKey = (token: string, session: string): string =>
   createHash('sha256').update(`${token}\u0000${session}`).digest('hex');
+/** The same digest, of the credential alone: enough to tell whose entry is whose, without a copy. */
+const ownerKey = (token: string): string => createHash('sha256').update(token).digest('hex');
 /** The first message of a conversation, the one an id is issued for. */
 const isInitialize = (req: { body?: unknown }): boolean => {
   const body = req.body as { method?: string; jsonrpc?: string } | undefined;
@@ -75,10 +77,28 @@ const selectionFor = (token: string, session: string): string => selections.get(
 // which can be the entry of a conversation still in progress: it forgets its project and is told to
 // choose again rather than acting on the wrong one.
 const SELECTION_LIMIT = 1000;
+const owners = new Map<string, string>();
 const remember = (token: string, session: string, project: string): void => {
   const key = selectionKey(token, session);
-  if (selections.size >= SELECTION_LIMIT && !selections.has(key)) selections.delete(selections.keys().next().value as string);
+  if (selections.size >= SELECTION_LIMIT && !selections.has(key)) {
+    // One of this credential's own conversations, not somebody else's. Evicting the globally oldest
+    // entry meant anyone holding a key could flush every other holder's choices just by opening
+    // conversations with made-up session ids, and a session that forgets its project mid-sentence is
+    // a session that stops working.
+    const owner = ownerKey(token);
+    const mine = [...owners.entries()].find(([, k]) => k === owner)?.[0];
+    const evicted = mine ?? selections.keys().next().value;
+    if (evicted !== undefined) {
+      selections.delete(evicted);
+      const gone = owners.get(evicted);
+      if (gone !== undefined) {
+        owners.delete(evicted);
+        if (![...owners.values()].includes(gone)) owners.delete(owner);
+      }
+    }
+  }
   selections.set(key, project);
+  owners.set(key, ownerKey(token));
 };
 /**
  * Forget a remembered choice, which is what a selection that has stopped being reachable calls for.
@@ -88,7 +108,9 @@ const remember = (token: string, session: string, project: string): void => {
  * built, `use_project` — the only way to change it — is unreachable. The key still reaches the others.
  */
 const forget = (token: string, session: string): void => {
-  selections.delete(selectionKey(token, session));
+  const key = selectionKey(token, session);
+  selections.delete(key);
+  owners.delete(key);
 };
 
 const providers = providersFromEnv(process.env);
@@ -132,6 +154,11 @@ app.post('/mcp', async (req, res) => {
   // remembered choice outranks NAUCTO_PROJECT, which names a default rather than an instruction —
   // otherwise `use_project` would report success and the next request would go somewhere else, and
   // the two would quietly disagree about which project the session is on.
+  //
+  // So a choice that gets evicted from the map does not put this path back to being asked: an
+  // assistant key here is pinned to a single project, and the Backend refuses a hint contradicting
+  // it, so NAUCTO_PROJECT is the correct answer for it, not a fallback. Being asked to choose again
+  // is what happens to a *client* credential whose chosen project stops being reachable.
   if (assistantKey) {
     return serve(req, res, assistantKey, { session, hint, remembered: selectionFor(assistantKey, session) || assistantProject });
   }
@@ -156,8 +183,16 @@ async function serve(
   let mustChoose = false;
   // Discovery has to work before a project is chosen, and for choosing it.
   const unscoped = new Set(['connection', 'projects']);
+  // Why nothing is pointed at yet, so the refusal a tool returns can say it accurately. A key that
+  // reached several games and has not chosen is one thing; a key whose chosen project was revoked
+  // out from under it is another, and telling the second that it "covers several projects" sends a
+  // model off to list projects that may no longer be there — or, if only one is left, to be told it
+  // must choose when there is nothing to choose between.
+  let chooseReason = 'This key covers several projects.';
   const call = async (path: string, body?: unknown, service = false, asProject = project): Promise<unknown> => {
-    if (mustChoose && !asProject && !unscoped.has(path)) throw new Error('This key covers several projects. Call list_projects, then use_project with one of the ids, before reading or changing anything.');
+    if (mustChoose && !asProject && !unscoped.has(path)) {
+      throw new Error(`${chooseReason} Call list_projects, then use_project with one of the ids, before reading or changing anything.`);
+    }
     const headers: Record<string, string> = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
     if (service) headers['x-naucto-ai-service'] = serviceSecret;
     if (asProject) headers['x-naucto-project'] = asProject;
@@ -196,6 +231,7 @@ async function serve(
       forget(token, scope.session);
       mustChoose = true;
       project = '';
+      chooseReason = 'The project this session was working on is no longer one this key reaches.';
     } else if (!/several projects|more than one/i.test(message)) {
       res.status(401).json({ error: message || 'AI connection expired or revoked' });
       return;

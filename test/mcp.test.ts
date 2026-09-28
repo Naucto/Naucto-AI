@@ -242,9 +242,12 @@ test('a choice that stops being reachable is forgotten, not held against the key
     await client.callTool({ name: 'use_project', arguments: { projectId: 22 } });
     shared.revoke();
 
-    // Refused, and the choice is dropped rather than repeated forever.
+    // Refused, and saying why it really is: not "this key covers several projects", which is a
+    // different situation and sends a model looking for a choice that may no longer exist.
     const refused = await client.callTool({ name: 'read_project', arguments: {} });
     assert.equal(refused.isError, true);
+    assert.match(text(refused), /no longer one this key reaches/);
+    assert.doesNotMatch(text(refused), /several projects/);
     assert.match(text(await client.callTool({ name: 'list_projects', arguments: {} })), /projects/);
 
     // With the grant back, the session can choose again rather than being stuck.
