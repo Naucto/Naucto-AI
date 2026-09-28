@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -41,6 +42,28 @@ if (assistantKey && !local) {
     'NAUCTO_KEY may only be used on a loopback bind: a remote caller cannot be told apart by a Host header, so lending the key would give it away. Bind to 127.0.0.1, or have clients send their own `Bearer naucto_k_…`.',
   );
 }
+// Which project a credential is currently working on.
+//
+// A key can reach several games, and the Backend refuses to guess between them, so a session that
+// has not chosen one cannot read or write anything. The choice has to outlive a single HTTP request,
+// because the MCP server is rebuilt on each one: it is kept here, per credential, and only the
+// credential's own hash is the key, so a selection cannot be applied to somebody else's key.
+//
+// A client's own `X-Naucto-Project` header still wins over this, and the Backend rejects a header
+// that contradicts an 8-hour project token, so a project token stays pinned to its one project no
+// matter what is remembered here.
+const selections = new Map<string, string>();
+/** A digest, so a remembered selection is not a copy of a credential sitting in a map. */
+const selectionKey = (token: string): string => createHash('sha256').update(token).digest('hex');
+const selectionFor = (token: string): string => selections.get(selectionKey(token)) ?? '';
+// Bounded, so it cannot grow without limit: selecting again overwrites, so the size is a high-water
+// mark of distinct credentials rather than of distinct projects.
+const SELECTION_LIMIT = 1000;
+const remember = (token: string, project: string): void => {
+  if (selections.size >= SELECTION_LIMIT && !selections.has(selectionKey(token))) selections.delete(selections.keys().next().value as string);
+  selections.set(selectionKey(token), project);
+};
+
 const providers = providersFromEnv(process.env);
 const queue = new GenerationQueue((input, signal) => generate(input, signal, providers), Number(process.env.NAUCTO_GENERATION_CONCURRENCY ?? 2));
 
@@ -60,22 +83,33 @@ app.post('/mcp', async (req, res) => {
   // The client's own credential, of either kind, and only that one. Falling back to the server's
   // key when a client sent something we did not recognise would serve identity A as identity B.
   const sent = req.headers.authorization?.match(/^Bearer ((?:naucto_ai|naucto_k)_[a-f0-9]{64})$/)?.[1];
-  if (sent) return serve(req, res, sent, hint);
+  if (sent) return serve(req, res, sent, hint || selectionFor(sent));
   if (req.headers.authorization) {
     res.status(401).json({ error: 'Unrecognised credential' });
     return;
   }
   // Nothing sent at all, and this is a loopback bind (see above): the owner at this machine.
-  if (assistantKey) return serve(req, res, assistantKey, assistantProject || hint);
+  if (assistantKey) return serve(req, res, assistantKey, assistantProject || hint || selectionFor(assistantKey));
   res.status(401).json({ error: 'An assistant key or a project token is required' });
 });
 
 /** One authenticated request: check the credential, then build the MCP server around it. */
-async function serve(req: Parameters<express.RequestHandler>[0], res: Parameters<express.RequestHandler>[1], token: string, project: string): Promise<void> {
-  const call = async (path: string, body?: unknown, service = false): Promise<unknown> => {
+async function serve(req: Parameters<express.RequestHandler>[0], res: Parameters<express.RequestHandler>[1], token: string, scope: string): Promise<void> {
+  // Which project this session is working on. A header from the client wins and is authoritative —
+  // the Backend refuses one that contradicts an 8-hour project token — and `use_project` can change
+  // it for an account key, so one session can move between the games a key reaches.
+  let project = scope;
+  // True only when the Backend said this key reaches several games, so nothing is pointed at yet.
+  // A key that covers one project needs no header at all — the Backend resolves it — so an empty
+  // scope is perfectly ordinary and must not be treated as "not chosen yet".
+  let mustChoose = false;
+  // Discovery has to work before a project is chosen, and for choosing it.
+  const unscoped = new Set(['connection', 'projects']);
+  const call = async (path: string, body?: unknown, service = false, asProject = project): Promise<unknown> => {
+    if (mustChoose && !asProject && !unscoped.has(path)) throw new Error('This key covers several projects. Call list_projects, then use_project with one of the ids, before reading or changing anything.');
     const headers: Record<string, string> = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
     if (service) headers['x-naucto-ai-service'] = serviceSecret;
-    if (project) headers['x-naucto-project'] = project;
+    if (asProject) headers['x-naucto-project'] = asProject;
     const result = await fetch(new URL(`/ai/mcp/${path}`, backend), {
       method: body === undefined ? 'GET' : 'POST',
       headers,
@@ -90,12 +124,26 @@ async function serve(req: Parameters<express.RequestHandler>[0], res: Parameters
     return result.json();
   };
   // Every request is authenticated, discovery included; the token never reaches a model provider.
+  //
+  // A key that reaches several games and has not chosen one is authenticated but not yet pointed at
+  // anything, and the Backend refuses to guess. That is a state the session can come up in: the
+  // server is built with only discovery available, so `list_projects` and `use_project` work and
+  // everything else says which project to pick. Refusing the connection instead would leave the
+  // model with no tool to call and nothing to pick from.
   try {
     z.object({ projectId: z.number().int(), userId: z.number().int() }).parse(await call('connection'));
   } catch (error) {
-    res.status(401).json({ error: error instanceof Error ? error.message : 'AI connection expired or revoked' });
-    return;
+    const message = error instanceof Error ? error.message : '';
+    if (!/several projects|more than one/i.test(message)) {
+      res.status(401).json({ error: message || 'AI connection expired or revoked' });
+      return;
+    }
+    // Authenticated, but it reaches several games and has not chosen one: everything except
+    // discovery is refused until `use_project` says which.
+    mustChoose = true;
+    project = '';
   }
+
   const ledger: Ledger = {
     create: async (kind, request) => z.object({ id: z.string() }).parse(await call('jobs', { kind, request })),
     claim: async id => z.object({ run: z.boolean() }).parse(await call(`jobs/${id}/claim`, {}, true)).run,
@@ -105,12 +153,12 @@ async function serve(req: Parameters<express.RequestHandler>[0], res: Parameters
   };
   const context = async (): Promise<{ hash: string; content: Context; ageMs?: number }> => call('context') as Promise<{ hash: string; content: Context; ageMs?: number }>;
 
-  const server = new McpServer({ name: 'naucto', version: '0.3.0' }, { instructions: `Naucto fantasy-console projects: Lua code, 16-colour sprite sheets, tile maps, chip music and SFX. Read with the read_* tools, then stage changes with propose_changes; a person reviews and applies them in the editor. You cannot approve or apply. Look at your work before proposing it: render_sheet, render_map and compare_sprites for art (draw with draw_sprite and transform_sprite), render_sound for music and effects (compose with the synth; bake_sample for samples). ${UNTRUSTED}` });
+  const server = new McpServer({ name: 'naucto', version: '0.3.0' }, { instructions: `Naucto fantasy-console projects: Lua code, 16-colour sprite sheets, tile maps, chip music and SFX. Read with the read_* tools, then stage changes with propose_changes; a person reviews and applies them in the editor. You cannot approve or apply. A key that reaches several games can only work on one at a time: call list_projects, then use_project, and every other tool follows that choice. Look at your work before proposing it: render_sheet, render_map and compare_sprites for art (draw with draw_sprite and transform_sprite), render_sound for music and effects (compose with the synth; bake_sample for samples). ${UNTRUSTED}` });
   const text = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] });
   const read = { readOnlyHint: true };
 
   server.registerTool('list_projects', {
-    description: `Every project this key may reach, with the name of each, how old the state it exposes is, and how many changes are waiting there. Use it first when a key covers more than one game: without X-Naucto-Project every other call is refused rather than guessed. ${UNTRUSTED}`,
+    description: `Every project this key may reach, with the name of each, how old the state it exposes is, and how many changes are waiting there, and which one this session is working on. Use it first when a key covers more than one game: nothing else works until one is chosen with use_project, and it is refused rather than guessed. ${UNTRUSTED}`,
     annotations: read,
   }, async () => {
     const projects = z.array(z.object({
@@ -119,9 +167,35 @@ async function serve(req: Parameters<express.RequestHandler>[0], res: Parameters
     })).parse(await call('projects'));
     return text({
       projects,
+      // Which one the next call will act on, so a model that has already chosen does not have to
+      // re-choose, and one that has not can see the state it is in.
+      currentProjectId: project ? Number(project) : null,
       note: 'A null contextUpdatedAt means no editor has ever shared that project, so there is nothing to work from yet. A large contextAgeMs means the state is old: changes you stage may be refused when a person applies them, because what they write is checked against the real document at that moment.',
       multiProject: projects.length > 1,
     });
+  });
+
+  server.registerTool('use_project', {
+    description: `Work on one of the projects this key reaches. Call list_projects first. Every other tool reads and writes whichever project was chosen last, so this is how a session moves between the games a key covers. An id this key may not reach is refused, and so is one belonging to somebody else. ${UNTRUSTED}`,
+    inputSchema: { projectId: z.number().int() },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  }, async ({ projectId }) => {
+    const projects = z.array(z.object({ projectId: z.number().int() })).parse(await call('projects'));
+    // Checked against what the key may actually reach, rather than sent straight through: a header
+    // naming a project this key cannot open must fail here, not as an opaque refusal later.
+    if (!projects.some(entry => entry.projectId === projectId)) {
+      throw new Error(`${projectId} is not one of the projects this key reaches. Pick one from list_projects.`);
+    }
+    const wanted = String(projectId);
+    // Confirmed against the Backend before it is remembered, so a selection is never something the
+    // next call would be refused for. A project token is pinned to one project, and the Backend is
+    // what refuses a hint that contradicts it — so that refusal surfaces here, at the choice.
+    const connection = z.object({ projectId: z.number().int(), name: z.string().optional() }).parse(
+      await call('connection', undefined, false, wanted),
+    );
+    remember(token, wanted);
+    project = wanted;
+    return text({ projectId: connection.projectId, name: connection.name ?? null, current: true });
   });
 
   server.registerTool('read_project', {

@@ -108,6 +108,20 @@ tell you is the case by its `stateAgeMs`.
 | `resize_map` | Grow or shrink; shrinking may only remove empty cells |
 | `net_permissions` | A `net.state` path, with `clientRead`/`clientWrite` and the value a session starts it at. `propose_changes` fills in `expect` from the state it read; a declaration somebody changed in the meantime is refused rather than overwritten |
 
+### Several projects at once
+
+A key can be linked to more than one game. The Backend will not guess which one a request means, so
+a session that has not chosen works on none of them: `list_projects` shows every project the key
+reaches, which one the session is on, how old that project's state is and how many changes are
+waiting there, and everything else refuses with a message naming `use_project`. `use_project` then
+picks the game, and the choice holds for the rest of the session — including across the separate
+HTTP requests an MCP session is made of — so one conversation can move between the projects a key
+reaches. A project id the key may not open is refused at the choice, before anything is sent on.
+
+A client's own `X-Naucto-Project` header still takes precedence, and an 8-hour project token is
+pinned to its single project: the Backend refuses a hint that contradicts one, so `use_project`
+reports that refusal rather than appearing to switch.
+
 These eight are what this tool accepts. The Backend understands two more — `delete_map` and
 `delete_sound` — which it refuses to revert, because a deleted level or sound cannot be described
 well enough to put back. Nothing here can submit them, so a change that removes artwork is out of

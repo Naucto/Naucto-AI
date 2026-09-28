@@ -6,6 +6,14 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { decodePng } from '../src/png.js';
 
+/**
+ * What the first test's stub and server left behind, so a later test can drive the same module
+ * instance instead of importing a second one at a second port.
+ */
+const shared: { multiToken: string; scopes: string[]; url: URL | null } = { multiToken: '', scopes: [], url: null };
+/** Closed once, after every test, so the servers outlive the first one. */
+const teardown: (() => Promise<void>)[] = [];
+
 const content = {
   palette: ['#000000', '#1d2b53', '#7e2553', '#008751', '#ab5236', '#5f574f', '#c2c3c7', '#fff1e8', '#ff004d', '#ffa300', '#ffec27', '#00e436', '#29adff', '#83769c', '#ff77a8', '#ffccaa'], code: [{ id: 'main', name: 'main', text: 'print(1)\nprint(2)' }], samples: [],
   instruments: {}, patterns: {}, songs: {}, sfx: {}, levels: {}, catalog: {}, locks: {},
@@ -16,10 +24,35 @@ const content = {
 test('HTTP MCP: authenticated, paginated reads, no self-approval, generation disabled unless configured', async () => {
   const token = `naucto_ai_${'a'.repeat(64)}`;
   const seen: string[] = [];
+  // One stub serves both credentials, so the two tests share a single module instance: the host
+  // allowlist and the remembered selections are both read when it loads, so a second instance would
+  // have to be built from a second port and a second import.
+  const MULTI = `naucto_ai_${'b'.repeat(64)}`;
+  shared.multiToken = MULTI;
+  const scopes = shared.scopes;
   const backend = createServer((req, res) => {
-    assert.equal(req.headers.authorization, `Bearer ${token}`);
+    assert.match(String(req.headers.authorization), /^Bearer naucto_(ai|k)_/);
+    const bearer = String(req.headers.authorization).slice(7);
+    const scope = String(req.headers['x-naucto-project'] ?? '');
     seen.push(`${req.method} ${req.url}`);
     res.setHeader('content-type', 'application/json');
+    if (bearer === MULTI) {
+      // A key reaching two games: the Backend refuses to guess, so a session has to choose.
+      if (req.url === '/ai/mcp/projects') {
+        res.end(JSON.stringify([
+          { projectId: 11, userId: 1, name: 'Moon', contextUpdatedAt: new Date(0).toISOString(), contextAgeMs: 5, pendingProposals: 0 },
+          { projectId: 22, userId: 1, name: 'Tower', contextUpdatedAt: null, contextAgeMs: null, pendingProposals: 2 },
+        ]));
+      } else if (req.url === '/ai/mcp/connection') {
+        if (!scope) { res.statusCode = 409; res.end(JSON.stringify({ message: 'This key reaches several projects' })); return; }
+        res.end(JSON.stringify({ projectId: Number(scope), userId: 1, name: scope === '11' ? 'Moon' : 'Tower' }));
+      } else if (req.url === '/ai/mcp/context') {
+        scopes.push(scope);
+        res.end(JSON.stringify({ hash: 'b'.repeat(64), content }));
+      } else { res.statusCode = 404; res.end('{}'); }
+      return;
+    }
+    assert.equal(bearer, token);
     if (req.url === '/ai/mcp/connection') res.end(JSON.stringify({ projectId: 7, userId: 1 }));
     else if (req.url === '/ai/mcp/context') res.end(JSON.stringify({ hash: 'a'.repeat(64), content }));
     else { res.statusCode = 404; res.end('{}'); }
@@ -84,7 +117,66 @@ test('HTTP MCP: authenticated, paginated reads, no self-approval, generation dis
     assert.ok(baked.bytes > 1000 && baked.sample.id === 'blip');
   } finally {
     await client.close();
-    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-    await new Promise<void>((resolve, reject) => backend.close(error => error ? reject(error) : resolve()));
+  }
+  // The servers stay up: the next test drives this same module instance.
+  shared.url = url;
+  teardown.push(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
+  teardown.push(() => new Promise<void>((resolve, reject) => backend.close(error => error ? reject(error) : resolve())));
+});
+
+test.after(async () => {
+  for (const close of teardown.splice(0)) await close();
+});
+
+test('a key that reaches several games picks one and works there, and refuses until it does', async () => {
+  // The stub and the server come from the test above: one module instance, two credentials.
+  assert.ok(shared.url, 'the shared MCP server was not started');
+  const url = shared.url;
+  const client = new Client({ name: 'test', version: '1' });
+  try {
+    await client.connect(new StreamableHTTPClientTransport(url, { requestInit: { headers: { authorization: `Bearer ${shared.multiToken}` } } }));
+
+    // Discovery works with nothing chosen, and says what the session is on.
+    const listed = toolJson(await client.callTool({ name: 'list_projects', arguments: {} }));
+    assert.deepEqual((listed['projects'] as { projectId: number }[]).map(p => p.projectId), [11, 22]);
+    assert.equal(listed['multiProject'], true);
+    assert.equal(listed['currentProjectId'], null);
+
+    // Everything else refuses, and names the tool to call rather than failing obscurely.
+    const tooEarly = await client.callTool({ name: 'read_project', arguments: {} });
+    assert.equal(tooEarly.isError, true);
+    assert.match(text(await tooEarly), /use_project/);
+
+    // A project this key cannot reach is refused, not sent on to the Backend.
+    const forbidden = await client.callTool({ name: 'use_project', arguments: { projectId: 99 } });
+    assert.equal(forbidden.isError, true);
+    assert.match(text(await forbidden), /not one of the projects/);
+
+    // Choosing makes the session work there, and the choice outlives the request that made it.
+    const chosen = await client.callTool({ name: 'use_project', arguments: { projectId: 22 } });
+    assert.equal(chosen.isError, undefined);
+    await client.callTool({ name: 'read_project', arguments: {} });
+    await client.callTool({ name: 'read_project', arguments: {} });
+    assert.deepEqual(shared.scopes, ['22', '22'], 'both reads reached the chosen project, in later requests');
+
+    // And it can move to the other game the key reaches.
+    await client.callTool({ name: 'use_project', arguments: { projectId: 11 } });
+    await client.callTool({ name: 'read_project', arguments: {} });
+    assert.deepEqual(shared.scopes, ['22', '22', '11']);
+    assert.equal(toolJson(await client.callTool({ name: 'list_projects', arguments: {} }))['currentProjectId'], 11);
+  } finally {
+    await client.close();
   }
 });
+
+/** A tool's text payload. The SDK types a result as a union of shapes, so it is read off the object. */
+function text(result: unknown): string {
+  const entry = (result as { content?: { text: string }[] }).content?.[0];
+  assert.ok(entry, 'the tool returned no content');
+  return entry.text;
+}
+
+/** A tool's JSON payload. */
+function toolJson(result: unknown): Record<string, unknown> {
+  return JSON.parse(text(result)) as Record<string, unknown>;
+}
