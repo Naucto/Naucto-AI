@@ -166,6 +166,37 @@ test.after(async () => {
   for (const close of teardown.splice(0)) await close();
 });
 
+test('a refusal arrives as a tool error, not a failed call', async () => {
+  // Thrown, a refusal becomes a JSON-RPC error: most clients surface that as a failed tool call or a
+  // dropped turn, so the reason is lost and a model retries blindly, or gives up on work it could
+  // have done. It has to arrive as the result of a tool that ran and could not finish.
+  const url = shared.url;
+  assert.ok(url, 'the shared MCP server was not started');
+  const open = async (): Promise<Client> => {
+    const client = new Client({ name: 'test', version: '1' });
+    await client.connect(new StreamableHTTPClientTransport(url, {
+      requestInit: { headers: { authorization: `Bearer ${shared.multiToken}` } },
+    }));
+    return client;
+  };
+  const client = await open();
+  const other = await open();
+  try {
+    // No project chosen yet, so everything but discovery refuses — and says which tool to call.
+    const refused = await client.callTool({ name: 'read_project', arguments: {} });
+    assert.equal(refused.isError, true);
+    assert.match(text(refused), /use_project/);
+
+    // A project this key may not reach, refused for its own reason.
+    const wrong = await other.callTool({ name: 'use_project', arguments: { projectId: 99 } });
+    assert.equal(wrong.isError, true);
+    assert.match(text(wrong), /is not one of the projects this key reaches/);
+  } finally {
+    await client.close();
+    await other.close();
+  }
+});
+
 test('a key that reaches several games picks one and works there, and refuses until it does', async () => {
   // The stub and the server come from the test above: one module instance, two credentials.
   assert.ok(shared.url, 'the shared MCP server was not started');
