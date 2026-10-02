@@ -4,17 +4,19 @@ A shared MCP service that lets an assistant (Claude Code, Codex, any MCP client)
 project: read it, draw sprites and compose sound with tools that show the result as pictures, and
 propose changes. PixelLab can be asked for a second opinion on sprites.
 
-The assistant **proposes**; a person **applies**. Every change is an immutable proposal that a
-project editor inspects in Naucto, in the assistant's own section of the GAME tab. Accepting sends
+The assistant **proposes**; a person **applies**. Every change is an immutable proposal, stored by the
+Backend whether or not anybody has the project open, and each editor (code, art, map, sound, net)
+lists the ones that touch it when the project is next opened. The code editor shows a change as a
+diff beside the file, red for what goes and green for what comes. Accepting sends
 the document as the accepting person has it, so the change merges into what they are looking at
 rather than replacing it, and nobody's editor is paused, unmounted or interrupted. Nothing the
 assistant does can approve, publish, delete or manage a project.
 
 ```
-Claude / Codex ──MCP (HTTP, project token)──▶ Naucto-AI ──▶ Backend (/ai/mcp/*)
+Claude / Codex ──MCP (HTTP, account key)──▶ Naucto-AI ──▶ Backend (/ai/mcp/*)
                                                  │               ▲
                                                  ▼               │ review, apply, revert
-                              PixelLab (sprites)      Frontend editor (every open tab)
+                              PixelLab (sprites)      Frontend editors (each reviews its own changes)
 ```
 
 ## Repositories
@@ -22,7 +24,7 @@ Claude / Codex ──MCP (HTTP, project token)──▶ Naucto-AI ──▶ Back
 ```
 EIP/
   Backend/    feat/naucto-ai  — proposals, apply, jobs ledger, provenance (NestJS + Prisma)
-  Frontend/   feat/naucto-ai  — assistant panel, previews, catalog/locks, music import, badges (Angular)
+  Frontend/   feat/naucto-ai  — per-editor review (code, art, map, sound, net), music import, provenance (Angular)
   Naucto-AI/  this repository — MCP service, pictures, offline synth, generation queue
 ```
 
@@ -41,9 +43,9 @@ drift. Edit them in the Frontend, never here.
 3. **This service**: `npm ci`, export the variables in `.env.example` (it does not load `.env`), then
    `npm start`. Or `docker compose up` beside the Backend (`NAUCTO_NETWORK` names its network).
    Build the docs (`npm run docs:build` in Frontend) for `search_engine_docs`.
-4. In a project, open **GAME → Connect / rotate token**. The token is scoped to that project and
-   that person, lasts eight hours, and is revoked by **Disconnect AI**. The editor shares its
-   current state (unsaved work included) every 20 s while the dialog is open.
+4. In **Settings → Assistant**, create an account key. It belongs to the account, not to a game: it
+   reaches every project the account owns, works whether or not anybody has the project open, and is
+   revoked from the same page. There is no per-project token and nothing to connect inside a game.
 5. Register the service in your client:
 
    ```sh
@@ -95,7 +97,8 @@ returned as data and the service instructs the client not to follow instructions
 operation against the document the accepting person actually had, not against a copy taken when the
 proposal was written; a change to anything that moved underneath it is refused rather than merged
 over. That means a proposal written against a stale read has to be redone, which `read_project` will
-tell you is the case by its `stateAgeMs`.
+tell you is the case by its `stateAgeMs`: the age of the project's last save, which is the state the
+assistant reads. Edits an open editor has not yet saved are not in it.
 
 | Operation | Notes |
 |---|---|
@@ -110,7 +113,7 @@ tell you is the case by its `stateAgeMs`.
 
 ### Several projects at once
 
-A key can be linked to more than one game. The Backend will not guess which one a request means, so
+An account key reaches every game its account owns. The Backend will not guess which one a request means, so
 a session that has not chosen works on none of them: `list_projects` shows every project the key
 reaches, which one the session is on, how old that project's state is and how many changes are
 waiting there, and everything else refuses with a message naming `use_project`. `use_project` then
@@ -124,9 +127,8 @@ one key do not steer each other. A client that sends no `mcp-session-id` at all 
 or a proxy that strips it — is treated as a single conversation on that key, so a second one would
 inherit the first's choice until the process restarts.
 
-A client's own `X-Naucto-Project` header still takes precedence, and an 8-hour project token is
-pinned to its single project: the Backend refuses a hint that contradicts one, so `use_project`
-reports that refusal rather than appearing to switch.
+A client's own `X-Naucto-Project` header still takes precedence. A project the account does not own is
+refused, so `use_project` reports that refusal rather than appearing to switch.
 
 These eight are what this tool accepts. The Backend understands two more — `delete_map` and
 `delete_sound` — which it refuses to revert, because a deleted level or sound cannot be described
@@ -199,6 +201,7 @@ Frontend: `npx playwright test e2e/ai.spec.ts`.
 ## Known limits
 
 - Coordination assumes every collaborator runs a build with AI support; older builds block applying.
+- Collaborators' projects are out of reach: a key covers the projects its account owns.
 - Platformer validation is a bounded approximation of the reference physics, not of arbitrary Lua.
 - The real PixelLab API is exercised only through its stub until a token is configured.
 - `transcribe_audio` takes WAV only; the editor decodes any format the browser can.

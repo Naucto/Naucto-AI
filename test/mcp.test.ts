@@ -22,7 +22,7 @@ const shared: {
   revoke: () => void;
   unlink: () => void;
 } = {
-  singleToken: `naucto_ai_${'a'.repeat(64)}`,
+  singleToken: `naucto_k_${'a'.repeat(64)}`,
   multiToken: '',
   victimToken: '',
   scopes: [],
@@ -46,15 +46,15 @@ const content = {
 };
 
 test('HTTP MCP: authenticated, paginated reads, no self-approval, generation disabled unless configured', async () => {
-  const token = `naucto_ai_${'a'.repeat(64)}`;
+  const token = `naucto_k_${'a'.repeat(64)}`;
   const seen: string[] = [];
   // One stub serves both credentials, so the two tests share a single module instance: the host
   // allowlist and the remembered selections are both read when it loads, so a second instance would
   // have to be built from a second port and a second import.
-  const MULTI = `naucto_ai_${'b'.repeat(64)}`;
+  const MULTI = `naucto_k_${'b'.repeat(64)}`;
   // A second key reaching the same two projects, so the eviction test has a bystander that has made
   // a choice worth losing.
-  const VICTIM = `naucto_ai_${'c'.repeat(64)}`;
+  const VICTIM = `naucto_k_${'c'.repeat(64)}`;
   shared.multiToken = MULTI;
   shared.victimToken = VICTIM;
   const TWO_PROJECT_KEYS = new Set([MULTI, VICTIM]);
@@ -77,7 +77,7 @@ test('HTTP MCP: authenticated, paginated reads, no self-approval, generation dis
         res.end(JSON.stringify(scope ? all.filter(entry => String(entry.projectId) === scope) : all));
       } else if (req.url === '/ai/mcp/connection') {
         if (!scope) { res.statusCode = 409; res.end(JSON.stringify({ message: 'This key reaches several projects' })); return; }
-        if (scope === '22' && shared.revoked) { res.statusCode = 401; res.end(JSON.stringify({ message: 'This key is not linked to that project' })); return; }
+        if (scope === '22' && shared.revoked) { res.statusCode = 401; res.end(JSON.stringify({ message: 'This key does not reach that project' })); return; }
         res.end(JSON.stringify({ projectId: Number(scope), userId: 1, name: scope === '11' ? 'Moon' : 'Tower' }));
       } else if (req.url === '/ai/mcp/context') {
         scopes.push(scope);

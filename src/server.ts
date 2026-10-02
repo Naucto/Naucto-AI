@@ -24,9 +24,9 @@ import { templates } from './templates.js';
 const backend = new URL(process.env.NAUCTO_BACKEND_URL ?? 'http://localhost:3000');
 const hosts = new Set((process.env.NAUCTO_MCP_HOSTS ?? 'localhost:3100,127.0.0.1:3100').split(','));
 const serviceSecret = process.env.AI_SERVICE_SECRET ?? '';
-// A long-lived assistant key, as the account owner issued it. It reaches only the projects it was
-// linked to, and never expires unless the owner gave it a date. NAUCTO_PROJECT names which one
-// when a key covers several; the 8-hour project token still works for the in-editor flow.
+// A long-lived assistant key, as the account owner issued it. It is the account's: it reaches every
+// project that account owns, with no per-project token, and never expires unless the owner gave it a
+// date. NAUCTO_PROJECT names which one to start on when the account owns several.
 //
 // The Host/Origin check above stops browsers, not clients: anything that can reach the port may
 // send a Host header it likes and no Origin at all. So lending this key to a request that arrived
@@ -49,9 +49,7 @@ if (assistantKey && !local) {
 // because the MCP server is rebuilt on each one: it is kept here, per credential, and only the
 // credential's own hash is the key, so a selection cannot be applied to somebody else's key.
 //
-// A client's own `X-Naucto-Project` header still wins over this, and the Backend rejects a header
-// that contradicts an 8-hour project token, so a project token stays pinned to its one project no
-// matter what is remembered here.
+// A client's own `X-Naucto-Project` header still wins over this.
 const selections = new Map<string, string>();
 /**
  * A digest, so a remembered selection is not a copy of a credential sitting in a map.
@@ -101,7 +99,7 @@ const remember = (token: string, session: string, project: string): void => {
 /**
  * Forget a remembered choice, which is what a selection that has stopped being reachable calls for.
  *
- * Without this, a key whose grant on the chosen project is revoked is locked out of the session that
+ * Without this, a key whose chosen project is deleted is locked out of the session that
  * chose it: every request would name a project the Backend refuses, and since the server is never
  * built, `use_project` — the only way to change it — is unreachable. The key still reaches the others.
  */
@@ -141,7 +139,7 @@ app.post('/mcp', async (req, res) => {
   }
   // The client's own credential, of either kind, and only that one. Falling back to the server's
   // key when a client sent something we did not recognise would serve identity A as identity B.
-  const sent = req.headers.authorization?.match(/^Bearer ((?:naucto_ai|naucto_k)_[a-f0-9]{64})$/)?.[1];
+  const sent = req.headers.authorization?.match(/^Bearer (naucto_k_[a-f0-9]{64})$/)?.[1];
   if (sent) return serve(req, res, sent, { session, hint, remembered: selectionFor(sent, session) });
   if (req.headers.authorization) {
     res.status(401).json({ error: 'Unrecognised credential' });
@@ -160,7 +158,7 @@ app.post('/mcp', async (req, res) => {
   if (assistantKey) {
     return serve(req, res, assistantKey, { session, hint, remembered: selectionFor(assistantKey, session) || assistantProject });
   }
-  res.status(401).json({ error: 'An assistant key or a project token is required' });
+  res.status(401).json({ error: 'An account assistant key is required' });
 });
 
 /** One authenticated request: check the credential, then build the MCP server around it. */
@@ -170,8 +168,7 @@ async function serve(
   token: string,
   scope: { session: string; hint: string; remembered: string },
 ): Promise<void> {
-  // Which project this session is working on. A header from the client wins and is authoritative —
-  // the Backend refuses one that contradicts an 8-hour project token — then a choice this session
+  // Which project this session is working on. A header from the client wins and is authoritative, then a choice this session
   // made, then the environment default. So one session can move between the games a key reaches,
   // and the move is what the next request uses.
   let project = scope.hint || scope.remembered;
@@ -218,13 +215,13 @@ async function serve(
     z.object({ projectId: z.number().int(), userId: z.number().int() }).parse(await call('connection'));
   } catch (error) {
     const message = error instanceof Error ? error.message : '';
-    // A project this credential no longer reaches — a grant revoked, a collaborator removed. If the
+    // A project this credential no longer reaches — a project deleted or no longer owned. If the
     // name came from this session's own choice, the choice is dropped and the session is asked to
     // choose again: otherwise every request would name a project the Backend refuses, the server
     // would never be built, and `use_project` — the only way to change it — would be unreachable. A
     // name the client sent itself is refused instead, since that is the client's instruction failing
     // and it is the client's to correct.
-    const unreachable = /not linked to that project|not a collaborator|no longer/i.test(message);
+    const unreachable = /does not reach that project|no longer/i.test(message);
     if (unreachable && scope.remembered && project === scope.remembered) {
       forget(token, scope.session);
       mustChoose = true;
@@ -250,7 +247,7 @@ async function serve(
   };
   const context = async (): Promise<{ hash: string; content: Context; ageMs?: number }> => call('context') as Promise<{ hash: string; content: Context; ageMs?: number }>;
 
-  const server = new McpServer({ name: 'naucto', version: '0.3.0' }, { instructions: `Naucto fantasy-console projects: Lua code, 16-colour sprite sheets, tile maps, chip music and SFX. Read with the read_* tools, then stage changes with propose_changes; a person reviews and applies them in the editor. You cannot approve or apply. A key that reaches several games can only work on one at a time: call list_projects, then use_project, and every other tool follows that choice. Look at your work before proposing it: render_sheet, render_map and compare_sprites for art (draw with draw_sprite and transform_sprite), render_sound for music and effects (compose with the synth; bake_sample for samples). ${UNTRUSTED}` });
+  const server = new McpServer({ name: 'naucto', version: '0.3.0' }, { instructions: `Naucto fantasy-console projects: Lua code, 16-colour sprite sheets, tile maps, chip music and SFX. Read with the read_* tools, then stage changes with propose_changes; a person reviews and applies them in the editor. You cannot approve or apply, and changes you stage wait for the project's owner whether or not anyone has it open. A key reaches every game of the account can only work on one at a time: call list_projects, then use_project, and every other tool follows that choice. Look at your work before proposing it: render_sheet, render_map and compare_sprites for art (draw with draw_sprite and transform_sprite), render_sound for music and effects (compose with the synth; bake_sample for samples). ${UNTRUSTED}` });
   const text = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] });
   const read = { readOnlyHint: true };
 
@@ -272,7 +269,7 @@ async function serve(
       // Which one the next call will act on, so a model that has already chosen does not have to
       // re-choose, and one that has not can see the state it is in.
       currentProjectId: project ? Number(project) : null,
-      note: 'A null contextUpdatedAt means no editor has ever shared that project, so there is nothing to work from yet. A large contextAgeMs means the state is old: changes you stage may be refused when a person applies them, because what they write is checked against the real document at that moment.',
+      note: 'A null contextUpdatedAt means the project has never been saved, so there is nothing to work from yet. contextAgeMs is how old the last save is, and unsaved edits of an open editor are not in it: changes you stage may be refused when a person applies them, because what they write is checked against the real document at that moment.',
       multiProject: projects.length > 1,
     });
   });
@@ -295,8 +292,8 @@ async function serve(
     }
     const wanted = String(projectId);
     // Confirmed against the Backend before it is remembered, so a selection is never something the
-    // next call would be refused for. A project token is pinned to one project, and the Backend is
-    // what refuses a hint that contradicts it — so that refusal surfaces here, at the choice.
+    // next call would be refused for. The Backend is what refuses a project the key does not
+    // reach, so that refusal surfaces here, at the choice.
     const connection = z.object({ projectId: z.number().int(), name: z.string().optional() }).parse(
       await call('connection', undefined, false, wanted),
     );
