@@ -23,7 +23,7 @@ const draftId = z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/);
 export const soundDraftSchema = z.object({
   instruments: z.array(z.record(z.unknown())).max(16).default([]),
   patterns: z.array(z.record(z.unknown())).min(1).max(32),
-  song: z.object({ name: z.string().max(100).default('draft'), sequence: z.array(draftId).min(1).max(128), loop: z.boolean().default(false), loopStart: z.number().int().min(0).default(0) }).optional(),
+  song: z.object({ name: z.string().max(100).default('draft'), sequence: z.array(draftId).min(1), loop: z.boolean().default(false), loopStart: z.number().int().min(0).default(0) }).optional(),
   samples: z.array(z.object({ id: draftId, data: z.string().max(11000) }).strict()).max(8).default([]),
 });
 export type SoundDraft = z.infer<typeof soundDraftSchema>;

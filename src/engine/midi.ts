@@ -10,6 +10,9 @@ export interface MidiNote {
   /** Start and end in seconds, after the tempo map. */
   start: number;
   end: number;
+  /** The same places in beats (quarter notes) from the start, when the file says them. */
+  startBeat?: number;
+  endBeat?: number;
   pitch: number;
   velocity: number;
   channel: number;
@@ -29,6 +32,14 @@ export interface ParsedMidi {
   /** Tempo in effect at the start, beats per minute. */
   bpm: number;
   tempoChanges: number;
+  /**
+   * The one tempo a performance played with a wavering pulse is best taken at, in beats a minute.
+   *
+   * Set only for a file with many small tempo changes — a recording of somebody playing, not a score
+   * with a ritardando — where timing in seconds drifts off the bars and no phrase lands twice in the
+   * same place. Notes are then placed by beat, so the music is as steady as it is written.
+   */
+  steadyBpm?: number;
   /** Notes whose release a sustain pedal held past their note-off. */
   sustained: number;
   warnings: string[];
@@ -83,6 +94,14 @@ export interface MidiImportReport {
   sustainedNotes: number;
   peakVoices: number;
   voiceBudget: number;
+  /** Places in the song's order list: how many sections the music is, repeats included. */
+  sections: number;
+  /** Sections that replay a pattern already stored instead of holding their notes again. */
+  reusedSections: number;
+  /** Steps in each pattern, chosen so the fewest notes have to be stored. */
+  patternSteps: number;
+  /** The finest timing the notes were snapped to, in steps: 1/8 keeps the file's own timing. */
+  timingGrid: number;
   warnings: string[];
 }
 
@@ -104,8 +123,24 @@ export interface MidiImport {
 const MAX_BYTES = 262144;
 const MAX_EVENTS = 50000;
 const MAX_SECONDS = 600;
-const PATTERN_STEPS = 32;
+/** Pattern lengths a conversion may use, each a whole number of bars at four steps a beat. */
+const PATTERN_SIZES = [32, 16, 64] as const;
+/** What one more stored pattern costs, in notes: a pattern is a slot and a name as well as its notes. */
+const PATTERN_OVERHEAD = 4;
+/** The finest timing a pattern holds, an eighth of a step. */
+const EXACT_GRID = 0.125;
+/** Coarser timings tried on music played by hand, whole steps first. */
+const TIDY_GRIDS = [1, 0.5, 0.25] as const;
+/** A coarser timing must store at most this share of what the exact one does... */
+const TIDY_GAIN = 0.85;
+/** ...and move a note's start by no more than this many steps on average. */
+const TIDY_SHIFT = 0.2;
+/** Volumes that differ by less than this count as the same note when comparing sections. */
+const VOLUME_TOLERANCE = 0.15;
 const RELEASE_SECONDS = 0.02;
+/** More tempo changes than this, all within this ratio of each other, are a wavering pulse. */
+const WAVERING_CHANGES = 8;
+const WAVERING_SPREAD = 1.5;
 
 /** General MIDI drum keys, mapped onto noise pitches that read as the same drum on the chip. */
 const DRUMS: [number[], number][] = [
@@ -288,6 +323,8 @@ export function readMidi(bytes: Uint8Array): ParsedMidi {
       const n = {
         start: seconds(note.tick),
         end: seconds(note.end),
+        startBeat: note.tick / ppq,
+        endBeat: note.end / ppq,
         pitch: note.pitch,
         velocity: note.velocity,
         channel: note.channel,
@@ -306,7 +343,18 @@ export function readMidi(bytes: Uint8Array): ParsedMidi {
   });
   if (duration > MAX_SECONDS) throw new Error('MIDI is longer than ten minutes');
   if (!tracks.some((t) => t.notes.length)) throw new Error('MIDI contains no completed notes');
-  if (map.length > 1)
+  // Many small changes around one tempo are a pulse that wavers, not a tempo that was written.
+  const speeds = map.map((entry) => entry.us);
+  const wavering =
+    map.length > WAVERING_CHANGES && Math.max(...speeds) / Math.min(...speeds) <= WAVERING_SPREAD;
+  let steadyBpm: number | undefined;
+  if (wavering && duration > 0) {
+    const beats = Math.max(...tracks.flatMap((t) => t.notes.map((n) => n.endBeat ?? 0)));
+    steadyBpm = (60 * beats) / duration;
+    warnings.add(
+      `${String(map.length - 1)} small tempo changes were evened out to one steady tempo, so repeated phrases line up.`,
+    );
+  } else if (map.length > 1)
     warnings.add(
       `${String(map.length - 1)} tempo change(s) were flattened: timing is kept, the song plays at one tempo.`,
     );
@@ -314,6 +362,7 @@ export function readMidi(bytes: Uint8Array): ParsedMidi {
   return {
     tracks,
     bpm: 60e6 / (map[0]?.us ?? 500000),
+    ...(steadyBpm === undefined ? {} : { steadyBpm }),
     tempoChanges: map.length - 1,
     sustained,
     warnings: [...warnings],
@@ -340,12 +389,86 @@ export function chipInstrument(name: string, percussion: boolean): Omit<MidiInst
   };
 }
 
+interface Attempt {
+  grid: number;
+  accepted: PackedNote[];
+  dropped: number;
+  peak: number;
+  quantized: number;
+  meanShift: number;
+  packed: Packed;
+}
+
+interface Packed {
+  steps: number;
+  patterns: PackedNote[][];
+  order: number[];
+  cost: number;
+}
+
+interface PackedNote {
+  step: number;
+  pitch: number;
+  length: number;
+  instrument: string;
+  volume: number;
+}
+
+/**
+ * Cuts the music into sections and stores each different one once.
+ *
+ * Music repeats: a theme is its phrase said again, a loop is a bar played over and over. Writing
+ * every repeat out in full is what made a short tune cost a hundred patterns, so a section whose
+ * notes are the same as an earlier one is not stored again; the song's order list just names that
+ * pattern a second time. A note that runs past its section is part of the section that holds it
+ * (the sequencer lets it sound into the next one), so two sections with the same notes sound alike
+ * wherever they sit.
+ *
+ * Two sections are the same when they play the same notes at the same places and every volume is
+ * within a small tolerance. A recorded performance never repeats a velocity exactly, and an exact
+ * comparison would find nothing to reuse in a file played by hand; the first occurrence's volumes
+ * are the ones kept.
+ *
+ * The length is chosen too, because a loop of one bar and a loop of four are both common and no one
+ * length suits both: the one that stores the fewest notes wins, a pattern's own cost counted in.
+ */
+function dedupeSections(sections: readonly (readonly PackedNote[])[], steps: number): Packed {
+  // Patterns already stored, by what they play apart from loudness.
+  const seen = new Map<string, number[]>();
+  const patterns: PackedNote[][] = [];
+  const order: number[] = [];
+  for (const section of sections) {
+    const relative = [...section].sort(
+      (a, b) => a.step - b.step || a.pitch - b.pitch || a.instrument.localeCompare(b.instrument),
+    );
+    const key = relative
+      .map((n) => `${String(n.step)}|${String(n.pitch)}|${String(n.length)}|${n.instrument}`)
+      .join(';');
+    const alike = (seen.get(key) ?? []).find((candidate) =>
+      (patterns[candidate] ?? []).every(
+        (n, i) => Math.abs(n.volume - (relative[i]?.volume ?? 0)) <= VOLUME_TOLERANCE,
+      ),
+    );
+    let slot = alike;
+    if (slot === undefined) {
+      slot = patterns.length;
+      seen.set(key, [...(seen.get(key) ?? []), slot]);
+      patterns.push(relative);
+    }
+    order.push(slot);
+  }
+  const cost = patterns.reduce((sum, p) => sum + p.length + PATTERN_OVERHEAD, 0);
+
+  return { steps, patterns, order, cost };
+}
+
 export function convertMidi(parsed: ParsedMidi, options: MidiImportOptions): MidiImport {
   const voices = options.voices;
   if (!Number.isInteger(voices) || voices < 1 || voices > 5)
     throw new Error('Voice budget must be 1–5');
   if (!/^[a-zA-Z0-9_-]{1,40}$/.test(options.prefix)) throw new Error('Invalid prefix');
-  const bpm = Math.round(options.bpm ?? parsed.bpm);
+  const steady = parsed.steadyBpm !== undefined;
+  const bpm = Math.round(options.bpm ?? parsed.steadyBpm ?? parsed.bpm);
   if (bpm < 40 || bpm > 240) throw new Error('Tempo is outside the editor range (40–240 BPM)');
   const chosen = parsed.tracks.filter(
     (t) => t.notes.length && (!options.tracks || options.tracks.includes(t.index)),
@@ -355,11 +478,17 @@ export function convertMidi(parsed: ParsedMidi, options: MidiImportOptions): Mid
   const stepsPerSecond = (bpm / 60) * 4;
   const release = RELEASE_SECONDS * stepsPerSecond;
   const instruments: MidiInstrument[] = [];
-  let quantized = 0;
   let percussionNotes = 0;
-  const candidates: {
+  interface Candidate {
     step: number;
     length: number;
+    pitch: number;
+    volume: number;
+    instrument: string;
+  }
+  const sources: {
+    start: number;
+    end: number;
     pitch: number;
     volume: number;
     instrument: string;
@@ -372,16 +501,13 @@ export function convertMidi(parsed: ParsedMidi, options: MidiImportOptions): Mid
       id,
     });
     for (const note of track.notes) {
-      const rawStep = note.start * stepsPerSecond;
-      const rawEnd = note.end * stepsPerSecond;
-      const step = Math.round(rawStep * 8) / 8;
-      const end = Math.max(step + 0.125, Math.round(rawEnd * 8) / 8);
-      if (Math.abs(step - rawStep) > 1e-6 || Math.abs(end - rawEnd) > 1e-6) quantized++;
       const drum = note.channel === 9;
       if (drum) percussionNotes++;
-      candidates.push({
-        step,
-        length: end - step,
+      sources.push({
+        // By beat for a pulse that wavers, so a bar is the same length every time it comes round.
+        start:
+          steady && note.startBeat !== undefined ? note.startBeat * 4 : note.start * stepsPerSecond,
+        end: steady && note.endBeat !== undefined ? note.endBeat * 4 : note.end * stepsPerSecond,
         pitch: drum ? drumPitch(note.pitch) : note.pitch,
         volume: note.velocity / 127,
         instrument: id,
@@ -389,59 +515,164 @@ export function convertMidi(parsed: ParsedMidi, options: MidiImportOptions): Mid
     }
   }
 
-  // Walk onsets in time order; at each, hand the free voices to the notes that matter most.
-  candidates.sort((a, b) => a.step - b.step || b.pitch - a.pitch);
-  const accepted: typeof candidates = [];
-  let ends: number[] = [];
-  let dropped = 0;
-  let peak = 0;
-  for (let i = 0; i < candidates.length;) {
-    const step = candidates[i]?.step ?? 0;
-    const batch: typeof candidates = [];
-    for (let next = candidates[i]; next?.step === step; next = candidates[++i]) batch.push(next);
-    ends = ends.filter((end) => end > step);
-    const free = voices - ends.length;
-    let keep = batch;
-    if (batch.length > free) {
-      if (options.strategy === 'first') keep = batch.slice(0, Math.max(0, free));
-      else {
-        const byPitch = [...batch].sort((a, b) => b.pitch - a.pitch);
-        const ordered = [
-          byPitch[0],
-          byPitch[byPitch.length - 1],
-          ...byPitch.slice(1, -1).sort((a, b) => b.volume - a.volume),
-        ];
-        keep = [...new Set(ordered.filter((n): n is (typeof batch)[number] => !!n))].slice(
-          0,
-          Math.max(0, free),
-        );
-      }
-      dropped += batch.length - keep.length;
-    }
-    for (const note of keep) {
-      accepted.push(note);
-      ends.push(note.step + note.length + release);
-    }
-    peak = Math.max(peak, ends.length);
-  }
-  if (!accepted.length) throw new Error('No notes fit the voice budget');
+  /**
+   * The whole conversion with onsets and ends snapped to a grid of `grid` steps.
+   *
+   * Done end to end for each grid rather than snapping afterwards, because the snap changes which
+   * notes sound together and so which of them a voice budget has room for.
+   */
+  const attempt = (grid: number): Attempt => {
+    const per = 1 / grid;
+    let quantized = 0;
+    let shift = 0;
+    const candidates: Candidate[] = sources.map((source) => {
+      const step = Math.round(source.start * per) / per;
+      const end = Math.max(step + grid, Math.round(source.end * per) / per);
+      if (Math.abs(step - source.start) > 1e-6 || Math.abs(end - source.end) > 1e-6) quantized++;
+      shift += Math.abs(step - source.start);
+      return {
+        step,
+        length: end - step,
+        pitch: source.pitch,
+        volume: source.volume,
+        instrument: source.instrument,
+      };
+    });
 
-  const total = Math.max(...accepted.map((n) => n.step + n.length));
-  const count = Math.ceil(total / PATTERN_STEPS);
-  if (count > 128)
-    throw new Error('The selection needs more than 128 patterns; import a shorter part');
+    candidates.sort((a, b) => a.step - b.step || b.pitch - a.pitch);
+    if (!candidates.length) throw new Error('No notes fit the voice budget');
+    const total = Math.max(...candidates.map((n) => n.step + n.length));
+
+    /** Walks onsets in time order; at each, hands the free voices to the notes that matter most. */
+    const allocate = (
+      list: readonly Candidate[],
+      held: number[],
+    ): { accepted: Candidate[]; dropped: number; peak: number; ends: number[] } => {
+      const accepted: Candidate[] = [];
+      let ends = held;
+      let dropped = 0;
+      let peak = 0;
+      for (let i = 0; i < list.length;) {
+        const step = list[i]?.step ?? 0;
+        const batch: Candidate[] = [];
+        for (let next = list[i]; next?.step === step; next = list[++i]) batch.push(next);
+        ends = ends.filter((end) => end > step);
+        const free = voices - ends.length;
+        let keep = batch;
+        if (batch.length > free) {
+          if (options.strategy === 'first') keep = batch.slice(0, Math.max(0, free));
+          else {
+            const byPitch = [...batch].sort((a, b) => b.pitch - a.pitch);
+            const ordered = [
+              byPitch[0],
+              byPitch[byPitch.length - 1],
+              ...byPitch.slice(1, -1).sort((a, b) => b.volume - a.volume),
+            ];
+            keep = [...new Set(ordered.filter((n): n is Candidate => !!n))].slice(
+              0,
+              Math.max(0, free),
+            );
+          }
+          dropped += batch.length - keep.length;
+        }
+        for (const note of keep) {
+          accepted.push(note);
+          ends.push(note.step + note.length + release);
+        }
+        peak = Math.max(peak, ends.length);
+      }
+
+      return { accepted, dropped, peak, ends };
+    };
+
+    let best: Attempt | null = null;
+    for (const steps of PATTERN_SIZES) {
+      const count = Math.ceil(total / steps);
+      const sections: Candidate[][] = Array.from({ length: count }, () => []);
+      for (const note of candidates) sections[Math.floor(note.step / steps)]?.push(note);
+      // What each distinct section turned out to be once the voice budget had its say. A section
+      // that comes round again is given the same answer: left to the walk, the notes dropped
+      // depend on whatever was still ringing from before, so the same bar lost different notes
+      // each time and no two of them matched.
+      const heard: { raw: Candidate[]; kept: PackedNote[]; dropped: number }[] = [];
+      const seenRaw = new Map<string, number[]>();
+      const kept: PackedNote[][] = [];
+      const accepted: PackedNote[] = [];
+      let ends: number[] = [];
+      let dropped = 0;
+      let peak = 0;
+      for (const [index, section] of sections.entries()) {
+        const base = index * steps;
+        const raw = section.map((n) => ({ ...n, step: n.step - base }));
+        const key = raw
+          .map((n) => `${String(n.step)}|${String(n.pitch)}|${String(n.length)}|${n.instrument}`)
+          .join(';');
+        ends = ends.filter((end) => end > base);
+        const known = (seenRaw.get(key) ?? [])
+          .map((i) => heard[i])
+          .find((h) =>
+            h?.raw.every((n, i) => Math.abs(n.volume - (raw[i]?.volume ?? 0)) <= VOLUME_TOLERANCE),
+          );
+        let result: { kept: PackedNote[]; dropped: number };
+        if (known) {
+          result = known;
+          for (const n of known.kept) ends.push(base + n.step + n.length + release);
+          peak = Math.max(peak, ends.length);
+        } else {
+          const out = allocate(section, ends);
+          ends = out.ends;
+          peak = Math.max(peak, out.peak);
+          result = {
+            kept: out.accepted.map((n) => ({ ...n, step: n.step - base })),
+            dropped: out.dropped,
+          };
+          seenRaw.set(key, [...(seenRaw.get(key) ?? []), heard.length]);
+          heard.push({ raw, ...result });
+        }
+        dropped += result.dropped;
+        kept.push(result.kept);
+        for (const n of result.kept) accepted.push({ ...n, step: n.step + base });
+      }
+      const packed = dedupeSections(kept, steps);
+      // Strictly better only, so a tie keeps the earlier size, which is the usual two bars.
+      if (!best || packed.cost < best.packed.cost)
+        best = {
+          grid,
+          accepted,
+          dropped,
+          peak,
+          quantized,
+          meanShift: sources.length ? shift / sources.length : 0,
+          packed,
+        };
+    }
+    if (!best?.accepted.length) throw new Error('No notes fit the voice budget');
+
+    return best;
+  };
+
+  // The file's own timing first. Then, for music played by hand, a coarser grid that makes the
+  // repeats line up — taken only when it pays for itself and moves notes by little.
+  const exact = attempt(EXACT_GRID);
+  let chosenAttempt = exact;
+  for (const grid of TIDY_GRIDS) {
+    const tidy = attempt(grid);
+    const smaller = tidy.packed.cost <= exact.packed.cost * TIDY_GAIN;
+    const close = tidy.meanShift <= TIDY_SHIFT;
+    const whole = tidy.accepted.length >= exact.accepted.length * 0.98;
+    if (smaller && close && whole && tidy.packed.cost < chosenAttempt.packed.cost)
+      chosenAttempt = tidy;
+  }
+  const { accepted, dropped, peak, quantized, packed } = chosenAttempt;
   const first = options.firstSlot ?? 0;
-  const patterns = Array.from({ length: count }, (_, index) => ({
+  const patterns = packed.patterns.map((notes, index) => ({
     id: `${options.prefix}-p${String(index)}`,
     slot: first + index,
     name: `${options.prefix} ${String(index + 1)}`,
     bpm,
     stepsPerBeat: 4 as const,
-    steps: PATTERN_STEPS,
-    // A note may run past its pattern's end; the sequencer lets it sound into the next one.
-    notes: accepted
-      .filter((n) => n.step >= index * PATTERN_STEPS && n.step < (index + 1) * PATTERN_STEPS)
-      .map((n) => ({ ...n, step: n.step - index * PATTERN_STEPS })),
+    steps: packed.steps,
+    notes,
   }));
   const warnings = [...parsed.warnings];
   if (percussionNotes)
@@ -456,7 +687,12 @@ export function convertMidi(parsed: ParsedMidi, options: MidiImportOptions): Mid
   return {
     instruments,
     patterns,
-    song: { name: options.prefix, sequence: patterns.map((p) => p.id), loop: true, loopStart: 0 },
+    song: {
+      name: options.prefix,
+      sequence: packed.order.map((index) => patterns[index]?.id ?? ''),
+      loop: true,
+      loopStart: 0,
+    },
     report: {
       sourceNotes: chosen.reduce((sum, t) => sum + t.notes.length, 0),
       importedNotes: accepted.length,
@@ -467,6 +703,10 @@ export function convertMidi(parsed: ParsedMidi, options: MidiImportOptions): Mid
       sustainedNotes: parsed.sustained,
       peakVoices: peak,
       voiceBudget: voices,
+      sections: packed.order.length,
+      reusedSections: packed.order.length - patterns.length,
+      patternSteps: packed.steps,
+      timingGrid: chosenAttempt.grid,
       warnings,
     },
   };

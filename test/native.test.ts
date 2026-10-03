@@ -177,3 +177,20 @@ test('a declaration carries what it expects to find, so a change to it is a conf
   assert.equal(parsed.kind, 'net_permissions');
   assert.deepEqual(parsed.kind === 'net_permissions' ? parsed.expect : undefined, { flags: 3 });
 });
+
+test('the only size limit on a proposal is 1 MiB for a code file', () => {
+  const hash = 'a'.repeat(64);
+  const propose = (operations: unknown[], extra: object = {}) => proposalSchema.safeParse({ title: 'T'.repeat(300), summary: 'S'.repeat(9000), snapshotHash: hash, operations, ...extra });
+  const code = (after: string) => ({ kind: 'code', fileId: 'main', before: '', after });
+  // Several hundred kilobytes of code, where a hundred thousand characters used to be the ceiling.
+  assert.equal(propose([code('-- line\n'.repeat(60000))]).success, true);
+  assert.equal(propose([code('a'.repeat(1024 * 1024))]).success, true);
+  assert.equal(propose([code('a'.repeat(1024 * 1024 + 1))]).success, false);
+  // Counted in bytes, not characters.
+  assert.equal(propose([code('é'.repeat(600000))]).success, false);
+  // Nor is a proposal held to a hundred operations, or a sheet edit to 65,536 pixels.
+  const many = Array.from({ length: 150 }, (_, i) => ({ kind: 'net_permissions', path: `p${i}`, clientRead: true, clientWrite: false, default: 0, expect: null }));
+  assert.equal(propose(many).success, true);
+  const pixels = { kind: 'pixels', sheetId: '0', changes: Array.from({ length: 70000 }, (_, i) => ({ x: i % 256, y: Math.floor(i / 256) % 256, before: 0, after: 1 })) };
+  assert.equal(propose([pixels]).success, true);
+});

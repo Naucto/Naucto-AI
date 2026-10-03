@@ -9,6 +9,8 @@ import { z } from 'zod';
 
 export const coordinate = z.number().int().min(0).max(4095);
 const id = z.string().min(1).max(100);
+/** The one size limit on a proposal: a code file is at most 1 MiB, counted in bytes. */
+const codeText = z.string().refine(text => Buffer.byteLength(text) <= 1024 * 1024, 'A code file cannot be larger than 1 MiB');
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 
 export const assetSchema = z.object({
@@ -39,23 +41,23 @@ const netDeclaration = z.object({
 }).strict();
 
 export const operationSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('code'), fileId: id, before: z.string().max(100000), after: z.string().max(100000) }).strict(),
+  z.object({ kind: z.literal('code'), fileId: id, before: codeText, after: codeText }).strict(),
   z.object({
     kind: z.literal('pixels'), sheetId: id,
-    changes: z.array(z.object({ x: coordinate, y: coordinate, before: z.number().int().min(0).max(15), after: z.number().int().min(0).max(15) }).strict()).min(1).max(65536),
+    changes: z.array(z.object({ x: coordinate, y: coordinate, before: z.number().int().min(0).max(15), after: z.number().int().min(0).max(15) }).strict()).min(1),
   }).strict(),
   z.object({
     kind: z.literal('tiles'), mapId: id,
     changes: z.array(z.union([
       z.object({ x: coordinate, y: coordinate, before: z.number().int().min(0).max(65535), assetId: id }).strict(),
       z.object({ x: coordinate, y: coordinate, before: z.number().int().min(0).max(65535), sprite: z.number().int().min(0).max(65535) }).strict(),
-    ])).min(1).max(65536),
+    ])).min(1),
   }).strict(),
   z.object({ kind: z.literal('catalog'), before: assetSchema.nullable(), after: assetSchema.nullable() }).strict(),
   z.object({
     kind: z.literal('sound'), category: z.enum(['MUSIC', 'SFX']), slot: z.number().int().min(0).max(255),
-    samples: z.array(z.object({ id, data: z.string().max(11000) }).strict()).max(8).optional(),
-    instruments: z.array(instrument).max(16), patterns: z.array(pattern).min(1).max(32), song: z.record(z.unknown()).optional(),
+    samples: z.array(z.object({ id, data: z.string().max(11000) }).strict()).optional(),
+    instruments: z.array(instrument), patterns: z.array(pattern).min(1), song: z.record(z.unknown()).optional(),
   }).strict(),
   z.object({
     kind: z.literal('create_map'), id: z.string().uuid(), name: z.string().min(1).max(100),
@@ -82,10 +84,10 @@ export const operationSchema = z.discriminatedUnion('kind', [
 ]);
 
 export const proposalSchema = z.object({
-  title: z.string().min(1).max(160),
-  summary: z.string().min(1).max(4000),
+  title: z.string().min(1),
+  summary: z.string().min(1),
   snapshotHash: hash,
-  operations: z.array(operationSchema).min(1).max(100),
+  operations: z.array(operationSchema).min(1),
 }).strict();
 
 export type Proposal = z.infer<typeof proposalSchema>;
