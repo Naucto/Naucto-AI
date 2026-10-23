@@ -7,7 +7,7 @@ import express from 'express';
 import { z } from 'zod';
 import { configured, generate, generationSchema, GenerationQueue, type Ledger, providersFromEnv } from './generation.js';
 import { draftLevel, platformReachable } from './levels.js';
-import { convertMidi, readMidi } from './engine/midi.js';
+import { convertMidi, readMidi } from '@naucto/engine/sound';
 import {
   adjacency, catalogStatus, type Context, designSfx, mapRegion, NET_CLIENT_READ, NET_CLIENT_WRITE, netPermissionExpectation, netPermissionRows, netUndeclaredUsages, placeSection,
   proposalSchema, reachable, resolveFlags, resolveRoles, SFX_KINDS, sha, sheetRegion, tileHash, varyPattern,

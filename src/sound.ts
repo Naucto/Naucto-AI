@@ -1,10 +1,10 @@
 import { z } from 'zod';
-import { convertMidi, type MidiImport, writeMidi } from './engine/midi.js';
-import { defaultInstrument, type Instrument, type Pattern, type Song, VOICES } from './engine/model.js';
-import { decodeSample, encodeSample, MAX_SAMPLE_SECONDS, SAMPLE_RATE, toSampleBytes } from './engine/sample-codec.js';
-import { Sequencer } from './engine/Sequencer.js';
-import { SynthCore } from './engine/SynthCore.js';
-import { analyseAudio, scoreImport, scoreNotes, scoreSample, type ScoredNote, transcribe } from './engine/transcribe.js';
+import { convertMidi, type MidiImport, writeMidi } from '@naucto/engine/sound';
+import { defaultInstrument, type Instrument, type Pattern, type Song, VOICES } from '@naucto/engine/sound';
+import { decodeSample, encodeSample, MAX_SAMPLE_SECONDS, SAMPLE_RATE, toSampleBytes } from '@naucto/engine/sound';
+import { Sequencer } from '@naucto/engine/sound';
+import { SynthCore } from '@naucto/engine/sound';
+import { analyseAudio, scoreImport, scoreNotes, scoreSample, type ScoredNote, transcribe } from '@naucto/engine/sound';
 import type { Context } from './native.js';
 import { pianoRoll, type RollNote, spectrogram, stacked, waveform } from './render.js';
 

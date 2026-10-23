@@ -28,11 +28,11 @@ EIP/
   Naucto-AI/  this repository — MCP service, pictures, offline synth, generation queue
 ```
 
-`src/engine/` holds verbatim copies of the engine's sound code from
-`Frontend/packages/engine/src/sound/`: the MIDI importer, the audio transcriber, and the chip synth
-(`model`, `SynthCore`, `Sequencer`, `sample-codec`). What the service renders is what a player hears,
-and its conversions are the editor's own. `npm run sync:shared` copies them; a test fails when they
-drift. Edit them in the Frontend, never here.
+The offline synth, MIDI importer, audio transcriber and sample codec are imported from
+`@naucto/engine/sound`, the same engine sources as the Frontend. The Backend reads saved
+documents through `@naucto/engine/headless` (`Game` + `aiContext`). Both services pin the same
+Node distribution under `vendor/`; there are no copied engine source files to synchronise.
+See `vendor/README.md` and the Frontend engine's `pack:node` command to update it.
 
 ## Running it
 

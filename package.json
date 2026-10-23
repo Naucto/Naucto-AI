@@ -10,11 +10,11 @@
     "start": "tsx src/server.ts",
     "stub": "tsx scripts/stub-endpoint.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test --test-concurrency=1 test/*.test.ts",
-    "sync:shared": "node scripts/sync-shared.mjs"
+    "test": "tsx --test --test-concurrency=1 test/*.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@naucto/engine": "file:vendor/naucto-engine-0.1.0-node.0940d741ef3e.tgz",
     "express": "^5.2.1",
     "zod": "^3.25.76"
   },
