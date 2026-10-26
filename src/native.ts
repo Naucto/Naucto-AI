@@ -11,7 +11,6 @@ export const coordinate = z.number().int().min(0).max(4095);
 const id = z.string().min(1).max(100);
 /** The one size limit on a proposal: a code file is at most 1 MiB, counted in bytes. */
 const codeText = z.string().refine(text => Buffer.byteLength(text) <= 1024 * 1024, 'A code file cannot be larger than 1 MiB');
-const hash = z.string().regex(/^[a-f0-9]{64}$/);
 
 export const assetSchema = z.object({
   id,
@@ -83,14 +82,12 @@ export const operationSchema = z.discriminatedUnion('kind', [
   }).strict(),
 ]);
 
-export const proposalSchema = z.object({
-  title: z.string().min(1),
-  summary: z.string().min(1),
-  snapshotHash: hash,
-  operations: z.array(operationSchema).min(1),
+/** Editing the isolated working save is independent of human approval. */
+export const saveSchema = z.object({
+  revision: z.number().int().positive(),
+  snapshot: z.string().max(22369624).optional(),
+  operations: z.array(operationSchema).min(1).max(10000).optional(),
 }).strict();
-
-export type Proposal = z.infer<typeof proposalSchema>;
 
 /* ---------------------------------------------------------------- context */
 

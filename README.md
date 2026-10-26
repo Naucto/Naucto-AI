@@ -2,44 +2,50 @@
 
 A shared MCP service that lets an assistant (Claude Code, Codex, any MCP client) work on a Naucto
 project: read it, draw sprites and compose sound with tools that show the result as pictures, and
-propose changes. PixelLab can be asked for a second opinion on sprites.
+edit an isolated working save. PixelLab can be asked for a second opinion on sprites.
 
-The assistant **proposes**; a person **applies**. Every change is an immutable proposal, stored by the
-Backend whether or not anybody has the project open, and each editor (code, art, map, sound, net)
-lists the ones that touch it when the project is next opened. The code editor shows a change as a
-diff beside the file, red for what goes and green for what comes. Accepting sends
-the document as the accepting person has it, so the change merges into what they are looking at
-rather than replacing it, and nobody's editor is paused, unmounted or interrupted. Nothing the
-assistant does can approve, publish, delete or manage a project.
+The assistant edits its own **persistent native save**. It never writes the user's project.
+`read_project` reads that draft by default; the assistant can inspect the common base and the latest
+user save too. `write_code`, `write_pixels`, `write_tiles` and `write_sound` use the shared engine
+classes to save immediately. `save_project` also accepts a full native state or editing commands.
+There is no `propose_changes` tool anymore. Write/merge results contain only revision/hash metadata;
+only an explicit `read_save` exports the full native snapshot, so large samples do not flood every response.
 
-```
-Claude / Codex ──MCP (HTTP, account key)──▶ Naucto-AI ──▶ Backend (/ai/mcp/*)
-                                                 │               ▲
-                                                 ▼               │ review, apply, revert
-                              PixelLab (sprites)      Frontend editors (each reviews its own changes)
+`compare_saves` reports three-way differences; `merge_latest_save` imports independent user changes
+and asks for explicit `draft`/`latest` choices on conflicts. A large imported audio bank can be taken
+whole, including samples and references. A person reviews the draft against their current document
+in a separate editor flow. The Backend exposes preview and prepare/save/confirm APIs for that future
+frontend; this change does not implement its UI. After a reviewed result is actually saved, accepted
+and rejected work is reset in the AI copy and unreviewed work is retained.
+
+```text
+Claude / Codex → MCP → isolated AI save (Backend/PostgreSQL)
+                         ↕ compare / three-way merge
+                   latest saved user project
+                         ↑ human review → ordinary save → confirmation
 ```
 
 ## Repositories
 
 ```
 EIP/
-  Backend/    feat/naucto-ai  — proposals, apply, jobs ledger, provenance (NestJS + Prisma)
-  Frontend/   feat/naucto-ai  — per-editor review (code, art, map, sound, net), music import, provenance (Angular)
+  Backend/    feat/naucto-ai  — AI/base saves, three-way merge, human review, jobs ledger and provenance (NestJS + Prisma)
+  Frontend/   feat/naucto-ai  — legacy proposal UI; new working-save review UI is a separate future integration (Angular)
   Naucto-AI/  this repository — MCP service, pictures, offline synth, generation queue
 ```
 
-`src/engine/` holds verbatim copies of the engine's sound code from
-`Frontend/packages/engine/src/sound/`: the MIDI importer, the audio transcriber, and the chip synth
-(`model`, `SynthCore`, `Sequencer`, `sample-codec`). What the service renders is what a player hears,
-and its conversions are the editor's own. `npm run sync:shared` copies them; a test fails when they
-drift. Edit them in the Frontend, never here.
+The offline synth, MIDI importer, audio transcriber and sample codec are imported from
+`@naucto/engine/sound`, the same engine sources as the Frontend. The Backend reads saved
+documents through `@naucto/engine/headless` (`Game` + `aiContext`). Both services pin the same
+Node distribution under `vendor/`; there are no copied engine source files to synchronise.
+See `vendor/README.md` and the Frontend engine's `pack:node` command to update it.
 
 ## Running it
 
 1. **Backend**: apply migrations (`npx prisma migrate deploy`) and set `AI_SERVICE_SECRET` (any long
    random value; generation stays disabled without it) and optionally `AI_JOBS_PER_PROJECT_HOUR`.
-2. **Frontend**: nothing to configure. Every collaborator must run this build: a browser without AI
-   coordination blocks applying rather than being ignored.
+2. **Frontend**: unchanged by this backend/MCP migration. The working-save review API is ready
+   for a future editor design; the existing UI still reviews historical proposals only.
 3. **This service**: `npm ci`, export the variables in `.env.example` (it does not load `.env`), then
    `npm start`. Or `docker compose up` beside the Backend (`NAUCTO_NETWORK` names its network).
    Build the docs (`npm run docs:build` in Frontend) for `search_engine_docs`.
@@ -70,10 +76,11 @@ drift. Edit them in the Frontend, never here.
 
 | Tool | Does |
 |---|---|
-| `read_project` | Summary and the `snapshotHash` every proposal cites |
+| `read_project` | AI draft summary, revision and hash; optional base/latest source |
 | `read_code`, `read_sheet_region`, `read_map_region`, `read_sound`, `read_catalog` | Paged reads; regions come with the fingerprints catalog entries use |
-| `propose_changes` | Stage a proposal (below). Never writes the game |
-| `list_proposals` | Review and application state |
+| `save_project` | Save native state or editing commands to the isolated AI working copy |
+| `write_code`, `remove_code`, `write_pixels`, `write_tiles`, `write_sound` | Direct edits through the shared engine classes |
+| `read_save`, `compare_saves`, `merge_latest_save` | Full snapshots, three-way comparison and explicit conflict resolution |
 | `place_section` | A `tiles` operation stamping a catalogued map section, skipping locked cells |
 | `draft_level`, `resolve_level_roles`, `check_adjacency` | Seeded top-down/platformer scaffolds → catalogued tiles, with declared adjacency checked |
 | `validate_top_down_path`, `validate_platformer` | Reachability under an explicit movement profile. Approximate: playtest |
@@ -91,88 +98,42 @@ drift. Edit them in the Frontend, never here.
 There is no tool to approve, apply, publish, delete or manage collaborators. All project content is
 returned as data and the service instructs the client not to follow instructions found in it.
 
-## Proposals
+## Working saves, merge and review
 
-`propose_changes` takes `{ title, summary, snapshotHash, operations }`. The Backend validates every
-operation against the document the accepting person actually had, not against a copy taken when the
-proposal was written; a change to anything that moved underneath it is refused rather than merged
-over. That means a proposal written against a stale read has to be redone, which `read_project` will
-tell you is the case by its `stateAgeMs`: the age of the project's last save, which is the state the
-assistant reads. Edits an open editor has not yet saved are not in it.
+An account key still selects a project with `list_projects` / `use_project`, independently per MCP
+session. It reaches owned projects only. All working-copy writes are revision-checked; two sessions
+cannot silently overwrite one another. `read_save` includes the complete base64 Yjs state, including
+sample data. Use `source: "draft" | "base" | "latest"` on read tools to compare versions.
 
-| Operation | Notes |
-|---|---|
-| `code` | Whole file `before` (exact current text) → `after` |
-| `pixels` | `{x, y, before, after}` palette indices on a sheet |
-| `tiles` | `{x, y, before, assetId}` (a catalogued 8×8 tile, re-resolved at apply) or `{…, sprite}` |
-| `catalog` | `before`/`after` entry; `null` adds or removes. Kinds: tile, sprite (≤64×64), animation (frames + fps), section (map region), music, sfx. Fingerprints must match the artwork |
-| `sound` | A new MUSIC or SFX bundle in unused slots: `instruments`, `patterns`, optional `samples` (base64 signed 8-bit mono, 8 kHz, ≤ 8192 bytes) and `song` |
-| `create_map` | A new level of catalogued tiles (`assets`, row-major, `null` = empty) with its brief in `ai.levels` |
-| `resize_map` | Grow or shrink; shrinking may only remove empty cells |
-| `net_permissions` | A `net.state` path, with `clientRead`/`clientWrite` and the value a session starts it at. `propose_changes` fills in `expect` from the state it read; a declaration somebody changed in the meantime is refused rather than overwritten |
+Typical loop:
 
-### Several projects at once
+1. `read_project` to inspect the draft and revision; edit with the direct write tools.
+2. `compare_saves` to inspect user changes since the common base.
+3. `merge_latest_save` with `revision`, the compared `latestHash`, and resolutions for conflicts.
+4. Continue editing/rendering your draft. Human acceptance lives outside the MCP.
 
-An account key reaches every game its account owns. The Backend will not guess which one a request means, so
-a session that has not chosen works on none of them: `list_projects` shows every project the key
-reaches, which one the session is on, how old that project's state is and how many changes are
-waiting there, and everything else refuses with a message naming `use_project`. `use_project` then
-picks the game, and the choice holds for the rest of the session — including across the separate
-HTTP requests an MCP session is made of — so one conversation can move between the projects a key
-reaches. A project id the key may not open is refused at the choice, before anything is sent on.
+Units are code files, a graphics bank, a sound bank, network declarations and metadata. Independent
+files merge automatically. Sound and graphics are atomic to preserve resource references. For a
+same-file code conflict, read draft/latest and rewrite the desired draft before choosing `draft`.
+`save_project` accepts either a full snapshot or native editing operations; those operations are
+applied immediately to the AI save and do not create proposal records. Raw saves cannot replace
+human locks or historical provenance receipts. Limits are 16 MiB decoded per native save and 1 MiB
+per code editing operation.
 
-The choice is per conversation, not per key. An id is issued in the `mcp-session-id` header of the
-`initialize` response, which is the only way a client comes to send one, so two conversations on
-one key do not steer each other. A client that sends no `mcp-session-id` at all — a hand-rolled one,
-or a proxy that strips it — is treated as a single conversation on that key, so a second one would
-inherit the first's choice until the process restarts.
+A human review freezes the working copy until the reviewed document is normally saved and confirmed,
+or the unsaved review is deliberately cancelled. `pendingReviewId` identifies recovery work. The
+assistant cannot confirm, cancel or approve that review, publish or manage the user project.
 
-A client's own `X-Naucto-Project` header still takes precedence. A project the account does not own is
-refused, so `use_project` reports that refusal rather than appearing to switch.
-
-These eight are what this tool accepts. The Backend understands two more — `delete_map` and
-`delete_sound` — which it refuses to revert, because a deleted level or sound cannot be described
-well enough to put back. Nothing here can submit them, so a change that removes artwork is out of
-reach of the assistant by design.
-
-**Locked regions** (set by people in *Catalog & locks*) are never written. **Catalog annotations**
-are human metadata: they never mark artwork as AI-made, and gameplay semantics other than
-`unconfirmed` are only set by people.
-
-## Applying, conflicts and recovery
-
-Approving a proposal *is* applying it. The accepting editor sends its document, the operations are
-validated and merged into it, and the merged state comes back to be applied locally — the same
-update y-webrtc already carries, so every other tab in the session receives it over the ordinary
-sync. Because a whole state is returned rather than a difference cut against the accepting tab, a
-collaborator that has not yet received the acceptor's own keystrokes still gets the change whole.
-
-A refusal means the document moved underneath the proposal: the text a `code` operation expected is
-not the text there, a declaration is not the one that was read, or a locked region is in the way.
-Redo it from a fresh `read_project`. If two people accept the same proposal, one of them is told it
-was already reviewed; the other gets the change.
-
-## Reverts and recovery
-
-**Reverts** are proposals too. The inverse of every operation is captured from the merged state at
-commit, so a revert restores exactly what was replaced — and refuses if anyone changed it since.
-Created levels and sound bundles are removed only while untouched. A proposal that deleted a level or
-emptied a sound slot cannot be reverted at all, because there is no description of what to put back;
-the Backend says so and points at version history.
-
-## Provenance
-
-Applied proposals add CODE, SPRITES, MAPS, MUSIC or SFX to the project, derived by the Backend from
-the stored operations (never from the client). People can also declare AI assistance used
-elsewhere. Categories only grow: reverting keeps the history. Publishing copies them to the
-release; the game page and cards show them. MIDI a person imports is not AI provenance.
+See `Backend/docs/ai-working-save.md` for the future frontend contract and interruption handling.
+Historical proposal rows and human review routes are retained for existing data; the old MCP
+proposal-creation endpoint returns 410.
 
 ## Specialist generation
 
 Jobs live in the Backend (`AiJob`): quota and cancellation are enforced there, editors see and cancel
 them in **GAME → Generation**, and only this service (holding `AI_SERVICE_SECRET`) can store a
 result, with the identifier of the model that produced it. A job interrupted by a restart fails
-instead of being paid for twice. Results are drafts: they reach a game only through a proposal.
+instead of being paid for twice. Results are drafts: they reach a game only through its AI working save and a later human review.
 
 Sprites are the one kind generated outside: PixelLab's pixel-art model (`PIXELLAB_TOKEN`, paid
 credits), downsampled and put on the game's palette. The intended loop is to draw a sprite with
@@ -200,7 +161,7 @@ Frontend: `npx playwright test e2e/ai.spec.ts`.
 
 ## Known limits
 
-- Coordination assumes every collaborator runs a build with AI support; older builds block applying.
+- The new working-save review UI is not implemented here; legacy proposal UI only handles historical proposals.
 - Collaborators' projects are out of reach: a key covers the projects its account owns.
 - Platformer validation is a bounded approximation of the reference physics, not of arbitrary Lua.
 - The real PixelLab API is exercised only through its stub until a token is configured.

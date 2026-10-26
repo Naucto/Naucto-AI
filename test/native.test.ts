@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   adjacency, catalogStatus, type Context, designSfx, netPermissionExpectation, netPermissionRows, operationSchema, netReferencedPaths, netUndeclaredUsages, placeSection,
-  proposalSchema, reachable, resolveFlags, resolveRoles, sha, tileHash, varyPattern,
+  saveSchema, reachable, resolveFlags, resolveRoles, sha, tileHash, varyPattern,
 } from '../src/native.js';
 
 function context(): Context {
@@ -22,11 +22,11 @@ test('connectivity cannot cross walls or start outside the map', () => {
   assert.equal(reachable([[true, true], [false, true]], [0, 0], [1, 1]), true);
 });
 
-test('proposals cannot smuggle approval or opaque updates', () => {
-  const base = { title: 'edit', summary: 'edit main', snapshotHash: 'a'.repeat(64), operations: [{ kind: 'code', fileId: 'main', before: '', after: 'print(1)' }] };
-  assert.equal(proposalSchema.safeParse(base).success, true);
-  assert.equal(proposalSchema.safeParse({ ...base, approved: true }).success, false);
-  assert.equal(proposalSchema.safeParse({ ...base, operations: [{ kind: 'applyYjsUpdate', data: 'x' }] }).success, false);
+test('AI saves cannot smuggle approval or unknown editing commands', () => {
+  const base = { revision: 1, operations: [{ kind: 'code', fileId: 'main', before: '', after: 'print(1)' }] };
+  assert.equal(saveSchema.safeParse(base).success, true);
+  assert.equal(saveSchema.safeParse({ ...base, approved: true }).success, false);
+  assert.equal(saveSchema.safeParse({ ...base, operations: [{ kind: 'applyYjsUpdate', data: 'x' }] }).success, false);
 });
 
 test('catalog entries go stale when their artwork changes', () => {
@@ -178,9 +178,8 @@ test('a declaration carries what it expects to find, so a change to it is a conf
   assert.deepEqual(parsed.kind === 'net_permissions' ? parsed.expect : undefined, { flags: 3 });
 });
 
-test('the only size limit on a proposal is 1 MiB for a code file', () => {
-  const hash = 'a'.repeat(64);
-  const propose = (operations: unknown[], extra: object = {}) => proposalSchema.safeParse({ title: 'T'.repeat(300), summary: 'S'.repeat(9000), snapshotHash: hash, operations, ...extra });
+test('AI code saves enforce the 1 MiB byte limit', () => {
+  const propose = (operations: unknown[], extra: object = {}) => saveSchema.safeParse({ revision: 1, operations, ...extra });
   const code = (after: string) => ({ kind: 'code', fileId: 'main', before: '', after });
   // Several hundred kilobytes of code, where a hundred thousand characters used to be the ceiling.
   assert.equal(propose([code('-- line\n'.repeat(60000))]).success, true);
