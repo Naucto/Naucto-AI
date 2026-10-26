@@ -22,7 +22,7 @@ test('credentials: a client key is used, a stranger gets nothing, and the key is
     borrows.push(String(req.headers.authorization));
     res.setHeader('content-type', 'application/json');
     if (req.url === '/ai/mcp/connection') res.end(JSON.stringify({ projectId: 7, userId: 1 }));
-    else if (req.url === '/ai/mcp/context') res.end(JSON.stringify({ hash: 'a'.repeat(64), content }));
+    else if (req.url === '/ai/mcp/workspace?source=draft') res.end(JSON.stringify({ revision: 1, hash: 'a'.repeat(64), snapshot: 'AA==', content }));
     else { res.statusCode = 404; res.end('{}'); }
   }).listen(0, '127.0.0.1');
   await once(backend, 'listening');

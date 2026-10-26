@@ -79,9 +79,9 @@ test('HTTP MCP: authenticated, paginated reads, no self-approval, generation dis
         if (!scope) { res.statusCode = 409; res.end(JSON.stringify({ message: 'This key reaches several projects' })); return; }
         if (scope === '22' && shared.revoked) { res.statusCode = 401; res.end(JSON.stringify({ message: 'This key does not reach that project' })); return; }
         res.end(JSON.stringify({ projectId: Number(scope), userId: 1, name: scope === '11' ? 'Moon' : 'Tower' }));
-      } else if (req.url === '/ai/mcp/context') {
+      } else if (req.url === '/ai/mcp/workspace?source=draft') {
         scopes.push(scope);
-        res.end(JSON.stringify({ hash: 'b'.repeat(64), content }));
+        res.end(JSON.stringify({ revision: 1, hash: 'b'.repeat(64), snapshot: 'AA==', content }));
       } else { res.statusCode = 404; res.end('{}'); }
       return;
     }
@@ -91,7 +91,7 @@ test('HTTP MCP: authenticated, paginated reads, no self-approval, generation dis
       // One project, so nothing is asked to choose and no header is ever sent.
       res.end(JSON.stringify([{ projectId: 7, userId: 1, name: 'Solo', contextUpdatedAt: new Date(0).toISOString(), contextAgeMs: 5, pendingProposals: 0 }]));
     }
-    else if (req.url === '/ai/mcp/context') res.end(JSON.stringify({ hash: 'a'.repeat(64), content }));
+    else if (req.url === '/ai/mcp/workspace?source=draft') res.end(JSON.stringify({ revision: 1, hash: 'a'.repeat(64), snapshot: 'AA==', content }));
     else { res.statusCode = 404; res.end('{}'); }
   }).listen(0, '127.0.0.1');
   await once(backend, 'listening');
@@ -114,10 +114,11 @@ test('HTTP MCP: authenticated, paginated reads, no self-approval, generation dis
     assert.equal((await fetch(url, { method: 'POST', headers: { origin: 'https://evil.invalid', authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: '{}' })).status, 403);
     await client.connect(new StreamableHTTPClientTransport(url, { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
     const { tools } = await client.listTools();
-    for (const name of ['read_project', 'read_code', 'read_catalog', 'propose_changes', 'place_section', 'design_sfx', 'convert_midi', 'request_generation', 'render_sheet', 'render_map', 'read_sprite', 'draw_sprite', 'transform_sprite', 'compare_sprites', 'render_sound', 'bake_sample', 'transcribe_audio']) {
+    for (const name of ['read_project', 'read_code', 'read_catalog', 'save_project', 'read_save', 'compare_saves', 'merge_latest_save', 'write_code', 'place_section', 'design_sfx', 'convert_midi', 'request_generation', 'render_sheet', 'render_map', 'read_sprite', 'draw_sprite', 'transform_sprite', 'compare_sprites', 'render_sound', 'bake_sample', 'transcribe_audio']) {
       assert.ok(tools.some(tool => tool.name === name), name);
     }
-    assert.ok(!tools.some(tool => /approve|apply|publish|delete/.test(tool.name)));
+    assert.ok(!tools.some(tool => /approve|apply|publish/.test(tool.name)));
+    assert.ok(!tools.some(tool => tool.name === 'propose_changes' || tool.name === 'list_proposals'));
     const summary = await client.callTool({ name: 'read_project', arguments: {} });
     const parsed = JSON.parse((summary.content as { text: string }[])[0]!.text) as { snapshotHash: string; sheets: unknown[] };
     assert.equal(parsed.snapshotHash, 'a'.repeat(64));
